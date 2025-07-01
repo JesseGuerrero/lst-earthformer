@@ -1,4 +1,3 @@
-
 import torch
 import torch.nn as nn
 import pytorch_lightning as pl
@@ -10,9 +9,6 @@ import numpy as np
 from typing import Dict, Any, Tuple
 import os
 from pathlib import Path
-
-# Import the dataloader from the previous artifact
-# from landsat_dataloader import LandsatDataModule
 
 class LandsatLSTPredictor(pl.LightningModule):
     def __init__(
@@ -160,8 +156,8 @@ class LandsatLSTPredictor(pl.LightningModule):
         return loss
     
     def configure_optimizers(self):
-        """Configure optimizers and learning rate schedulers"""
-        # AdamW optimizer with weight decay
+        """Configure optimizers - simplified without scheduler for now"""
+        # Just return the optimizer without any scheduler
         optimizer = torch.optim.AdamW(
             self.parameters(),
             lr=self.hparams.learning_rate,
@@ -169,24 +165,23 @@ class LandsatLSTPredictor(pl.LightningModule):
             betas=(0.9, 0.999)
         )
         
-        # Learning rate scheduler with warmup
-        def lr_lambda(step):
-            if step < self.hparams.warmup_steps:
-                return step / self.hparams.warmup_steps
-            else:
-                # Cosine annealing after warmup
-                progress = (step - self.hparams.warmup_steps) / (
-                    self.trainer.estimated_stepping_batches - self.hparams.warmup_steps
-                )
-                return 0.5 * (1 + np.cos(np.pi * progress))
+        return optimizer
         
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-        
+        # Alternative: If you want to try a scheduler later, uncomment this:
+        """
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
-                "scheduler": scheduler,
-                "interval": "step",
+                "scheduler": torch.optim.lr_scheduler.ReduceLROnPlateau(
+                    optimizer, 
+                    mode='min',
+                    factor=0.5,
+                    patience=5,
+                    verbose=True
+                ),
+                "interval": "epoch",
                 "frequency": 1,
+                "monitor": "val_loss",
             },
         }
+        """
