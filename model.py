@@ -12,10 +12,6 @@ from pathlib import Path
 class LandsatLSTPredictor(pl.LightningModule):
     def __init__(
         self,
-        learning_rate: float = 1e-4,
-        weight_decay: float = 1e-5,
-        warmup_steps: int = 1000,
-        max_epochs: int = 100,
         log_images_every_n_epochs: int = 5,
         max_images_to_log: int = 4,
         **model_kwargs
@@ -740,7 +736,7 @@ class LandsatLSTPredictor(pl.LightningModule):
         mae = torch.nn.functional.l1_loss(predictions, targets)
         
         # Log metrics
-        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log('train_loss', torch.sqrt(loss), on_step=True, on_epoch=True, prog_bar=True)
         self.log('train_mae', mae, on_step=True, on_epoch=True)
         
         # Calculate temperature-specific metrics
@@ -775,7 +771,7 @@ class LandsatLSTPredictor(pl.LightningModule):
         mae = torch.nn.functional.l1_loss(predictions, targets)
         
         # Log metrics
-        self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True)
+        self.log('val_loss', torch.sqrt(loss), on_step=False, on_epoch=True, prog_bar=True)
         self.log('val_mae', mae, on_step=False, on_epoch=True)
         
         # Temperature-specific metrics
@@ -821,7 +817,7 @@ class LandsatLSTPredictor(pl.LightningModule):
         mae = torch.nn.functional.l1_loss(predictions, targets)
         rmse = torch.sqrt(torch.nn.functional.mse_loss(predictions, targets))
         
-        self.log('test_loss', loss, on_step=False, on_epoch=True)
+        self.log('test_loss', torch.sqrt(loss), on_step=False, on_epoch=True)
         self.log('test_mae', mae, on_step=False, on_epoch=True)
         self.log('test_rmse', rmse, on_step=False, on_epoch=True)
         

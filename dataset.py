@@ -361,38 +361,3 @@ class LandsatDataModule(pl.LightningDataModule):
             pin_memory=True,
             persistent_workers=True if self.num_workers > 0 else False
         )
-
-
-# Example usage and testing
-if __name__ == "__main__":
-    # Test the tiled dataloader
-    print("Testing tiled dataset...")
-    
-    data_module = LandsatDataModule(
-        dataset_root="./Data/Dataset",
-        batch_size=2,
-        num_workers=0,  # Use 0 for debugging
-        sequence_length=3
-    )
-    
-    print("Setting up data module...")
-    data_module.setup("fit")
-    
-    print("Creating train dataloader...")
-    train_loader = data_module.train_dataloader()
-    
-    print(f"Number of training batches: {len(train_loader)}")
-    
-    # Test a few batches
-    print("Testing batches...")
-    for batch_idx, (inputs, targets) in enumerate(train_loader):
-        print(f"Batch {batch_idx}:")
-        print(f"  Input shape: {inputs.shape}")   # Should be (B, T, H, W, C) = (2, 3, 128, 128, 9)
-        print(f"  Target shape: {targets.shape}") # Should be (B, T, H, W, 1) = (2, 3, 128, 128, 1)
-        print(f"  Input range: {inputs.min().item():.3f} to {inputs.max().item():.3f}")
-        print(f"  Target range: {targets.min().item():.3f} to {targets.max().item():.3f}")
-        
-        if batch_idx == 2:  # Test a few batches
-            break
-    
-    print("✅ Tiled dataset test completed successfully!")
