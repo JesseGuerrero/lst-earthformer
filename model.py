@@ -12,6 +12,10 @@ from pathlib import Path
 class LandsatLSTPredictor(pl.LightningModule):
     def __init__(
         self,
+        learning_rate: float = 1e-4,
+        weight_decay: float = 1e-5,
+        warmup_steps: int = 1000,
+        max_epochs: int = 100,
         log_images_every_n_epochs: int = 5,
         max_images_to_log: int = 4,
         **model_kwargs
@@ -94,11 +98,11 @@ class LandsatLSTPredictor(pl.LightningModule):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through the model"""
         return self.model(x)
-    
+
     def create_landsat_visualization(self, inputs: torch.Tensor, targets: torch.Tensor, 
-                               predictions: Optional[torch.Tensor] = None, 
-                               batch_idx: int = 0, max_samples: int = 2) -> plt.Figure:
-        """Create comprehensive visualization of Landsat data with proper int16 scaling"""
+                            predictions: Optional[torch.Tensor] = None, 
+                            batch_idx: int = 0, max_samples: int = 2) -> plt.Figure:
+        """Create comprehensive visualization of Landsat data with raw TIFF values preserved"""
         # Move to CPU and convert to numpy
         inputs_np = inputs.detach().cpu().numpy()
         targets_np = targets.detach().cpu().numpy()
@@ -122,6 +126,7 @@ class LandsatLSTPredictor(pl.LightningModule):
             sample_input = inputs_np[sample_idx, middle_t]  # (H, W, C)
             sample_target = targets_np[sample_idx, middle_t, :, :, 0]  # (H, W)
             
+            # === RGB VISUALIZATION (properly scaled) ===
             # Unscale RGB bands (indices 2, 3, 4) from int16 to reflectance [0, 1]
             red_scaled = sample_input[:, :, 2] / 10000.0    # Red band
             green_scaled = sample_input[:, :, 3] / 10000.0  # Green band  
@@ -135,19 +140,34 @@ class LandsatLSTPredictor(pl.LightningModule):
             nodata_mask = (sample_input[:, :, 2] == 0) | (sample_input[:, :, 3] == 0) | (sample_input[:, :, 4] == 0)
             rgb[nodata_mask] = 0
             
-            # NDVI visualization - unscale from int16 to [-1, 1]
+            # === NDVI VISUALIZATION ===
             ndvi_scaled = sample_input[:, :, 5] / 10000.0  # NDVI band
             ndvi_scaled = np.clip(ndvi_scaled, -1, 1)
             ndvi_masked = np.where(sample_input[:, :, 5] == 0, np.nan, ndvi_scaled)
             
-            # LST target - already in Fahrenheit, no scaling needed
-            lst_target = sample_target.copy()  # Keep original values
-            lst_target_masked = np.where(lst_target == 0, np.nan, lst_target)
+            # === LST VISUALIZATION - USE RAW VALUES ===
+            # The LST TIFF already contains temperature in the correct units
+            # No scaling needed - use the raw integer values directly
+            lst_target_raw = sample_target.copy()
             
-            # Debug: Print actual LST values to verify
-            valid_lst = lst_target[lst_target != 0]
-            if len(valid_lst) > 0:
-                print(f"Sample {sample_idx}: LST range {np.min(valid_lst):.1f}°F to {np.max(valid_lst):.1f}°F")
+            # Only mask true nodata values (typically 0 or specific nodata value)
+            # Check for reasonable temperature ranges to identify nodata
+            # Reasonable LST range might be -50°F to 150°F (-45°C to 65°C)
+            reasonable_temp_mask = (lst_target_raw >= -50) & (lst_target_raw <= 150)
+            lst_target_masked = np.where(reasonable_temp_mask, lst_target_raw, np.nan)
+            
+            # Print raw LST statistics for debugging
+            valid_lst_values = lst_target_raw[reasonable_temp_mask]
+            if len(valid_lst_values) > 0:
+                print(f"Sample {sample_idx}: Raw LST values - Min: {np.min(valid_lst_values):.1f}, "
+                    f"Max: {np.max(valid_lst_values):.1f}, Mean: {np.mean(valid_lst_values):.1f}")
+                
+                # Also print some actual pixel values for verification
+                center_y, center_x = lst_target_raw.shape[0]//2, lst_target_raw.shape[1]//2
+                center_region = lst_target_raw[center_y-2:center_y+3, center_x-2:center_x+3]
+                print(f"Center region LST values:\n{center_region}")
+            else:
+                print(f"Sample {sample_idx}: No valid LST values found!")
             
             # Plot RGB composite
             axes[sample_idx, 0].imshow(rgb)
@@ -161,39 +181,55 @@ class LandsatLSTPredictor(pl.LightningModule):
             cbar1 = plt.colorbar(ndvi_im, ax=axes[sample_idx, 1], fraction=0.046, pad=0.04)
             cbar1.set_label('NDVI Index')
             
-            # Plot LST target - use actual data range, not percentiles
+            # Plot LST target with raw values
             if not np.all(np.isnan(lst_target_masked)):
                 # Use actual min/max from the data for accurate color mapping
                 temp_min = np.nanmin(lst_target_masked)
                 temp_max = np.nanmax(lst_target_masked)
+                
+                # Ensure reasonable color scale range
+                if temp_max - temp_min < 1:  # If range is very small, expand it
+                    temp_center = (temp_min + temp_max) / 2
+                    temp_min = temp_center - 10
+                    temp_max = temp_center + 10
             else:
                 temp_min, temp_max = 32, 100  # fallback
+                print(f"Warning: Using fallback temperature range for sample {sample_idx}")
                 
             lst_im = axes[sample_idx, 2].imshow(lst_target_masked, cmap='coolwarm', vmin=temp_min, vmax=temp_max)
-            axes[sample_idx, 2].set_title(f'LST Target\n(t={middle_t}, {temp_min:.1f}-{temp_max:.1f}°F)')
+            axes[sample_idx, 2].set_title(f'LST Target (Raw TIFF)\n(t={middle_t}, {temp_min:.1f}-{temp_max:.1f}°F)')
             axes[sample_idx, 2].axis('off')
             cbar2 = plt.colorbar(lst_im, ax=axes[sample_idx, 2], fraction=0.046, pad=0.04)
             cbar2.set_label('Temperature (°F)')
             
-            # Plot prediction if available
+            # Plot prediction if available (also use raw values)
             if predictions is not None:
-                sample_pred = predictions_np[sample_idx, middle_t, :, :, 0]  # (H, W)
-                sample_pred_masked = np.where(sample_pred == 0, np.nan, sample_pred)
+                sample_pred_raw = predictions_np[sample_idx, middle_t, :, :, 0]  # (H, W)
+                
+                # Apply same reasonable temperature mask to predictions
+                pred_reasonable_mask = (sample_pred_raw >= -50) & (sample_pred_raw <= 150)
+                sample_pred_masked = np.where(pred_reasonable_mask, sample_pred_raw, np.nan)
                 
                 # Use same temperature range as target for comparison
                 pred_im = axes[sample_idx, 3].imshow(sample_pred_masked, cmap='coolwarm', vmin=temp_min, vmax=temp_max)
-                axes[sample_idx, 3].set_title(f'LST Prediction\n(t={middle_t}, °F)')
+                axes[sample_idx, 3].set_title(f'LST Prediction (Raw)\n(t={middle_t}, °F)')
                 axes[sample_idx, 3].axis('off')
                 cbar3 = plt.colorbar(pred_im, ax=axes[sample_idx, 3], fraction=0.046, pad=0.04)
                 cbar3.set_label('Temperature (°F)')
+                
+                # Print prediction statistics
+                valid_pred_values = sample_pred_raw[pred_reasonable_mask]
+                if len(valid_pred_values) > 0:
+                    print(f"Sample {sample_idx}: Raw Prediction values - Min: {np.min(valid_pred_values):.1f}, "
+                        f"Max: {np.max(valid_pred_values):.1f}, Mean: {np.mean(valid_pred_values):.1f}")
         
         plt.tight_layout()
         return fig
-        
+
     def create_temporal_sequence_viz(self, inputs: torch.Tensor, targets: torch.Tensor,
-                                   predictions: Optional[torch.Tensor] = None,
-                                   sample_idx: int = 0) -> plt.Figure:
-        """Create visualization showing temporal sequence with proper scaling"""
+                                predictions: Optional[torch.Tensor] = None,
+                                sample_idx: int = 0) -> plt.Figure:
+        """Create visualization showing temporal sequence with raw TIFF values"""
         inputs_np = inputs.detach().cpu().numpy()
         targets_np = targets.detach().cpu().numpy()
         if predictions is not None:
@@ -211,98 +247,105 @@ class LandsatLSTPredictor(pl.LightningModule):
         if n_timesteps == 1:
             axes = axes.reshape(1, -1)
         
-        # DEBUG: Print actual data ranges to understand scaling
-        print("=== LST DATA ANALYSIS ===")
+        # Print comprehensive data analysis
+        print("=== RAW LST TIFF VALUE ANALYSIS ===")
+        
+        # Collect all temperature values for global range calculation
+        all_temp_values = []
+        
         for t in range(n_timesteps):
-            input_lst = sample_input[t, :, :, 1]  # LST band index 1
-            target_lst = sample_target[t, :, :, 0]
+            # Extract LST data (band index 1 for input, index 0 for target)
+            input_lst_raw = sample_input[t, :, :, 1]  # LST band from input
+            target_lst_raw = sample_target[t, :, :, 0]  # LST from target
             
-            # Analyze non-zero values
-            input_nonzero = input_lst[input_lst != 0]
-            target_nonzero = target_lst[target_lst != 0]
+            # Apply reasonable temperature filter
+            input_reasonable = (input_lst_raw >= -50) & (input_lst_raw <= 150)
+            target_reasonable = (target_lst_raw >= -50) & (target_lst_raw <= 150)
+            
+            input_valid = input_lst_raw[input_reasonable]
+            target_valid = target_lst_raw[target_reasonable]
             
             print(f"Timestep {t}:")
-            print(f"  Input LST  - Min: {input_nonzero.min():.1f}, Max: {input_nonzero.max():.1f}, Mean: {input_nonzero.mean():.1f}")
-            print(f"  Target LST - Min: {target_nonzero.min():.1f}, Max: {target_nonzero.max():.1f}, Mean: {target_nonzero.mean():.1f}")
-            
+            if len(input_valid) > 0:
+                print(f"  Input LST  - Min: {input_valid.min():.1f}°F, Max: {input_valid.max():.1f}°F, Mean: {input_valid.mean():.1f}°F")
+                all_temp_values.extend(input_valid.tolist())
+            if len(target_valid) > 0:
+                print(f"  Target LST - Min: {target_valid.min():.1f}°F, Max: {target_valid.max():.1f}°F, Mean: {target_valid.mean():.1f}°F")
+                all_temp_values.extend(target_valid.tolist())
+                
             if predictions is not None:
-                pred_lst = predictions_np[sample_idx, t, :, :, 0]
-                pred_nonzero = pred_lst[pred_lst != 0]
-                print(f"  Pred LST   - Min: {pred_nonzero.min():.1f}, Max: {pred_nonzero.max():.1f}, Mean: {pred_nonzero.mean():.1f}")
+                pred_lst_raw = predictions_np[sample_idx, t, :, :, 0]
+                pred_reasonable = (pred_lst_raw >= -50) & (pred_lst_raw <= 150)
+                pred_valid = pred_lst_raw[pred_reasonable]
+                if len(pred_valid) > 0:
+                    print(f"  Pred LST   - Min: {pred_valid.min():.1f}°F, Max: {pred_valid.max():.1f}°F, Mean: {pred_valid.mean():.1f}°F")
+                    all_temp_values.extend(pred_valid.tolist())
         
-        # Calculate global temperature range for consistent scaling
-        # Use ALL timesteps and both input and target data
-        all_input_lst = sample_input[:, :, :, 1].flatten()  # All input LST values
-        all_target_lst = sample_target[:, :, :, 0].flatten()  # All target LST values
-        
-        # Combine input and target for global range (exclude zeros)
-        all_lst_values = np.concatenate([
-            all_input_lst[all_input_lst != 0],
-            all_target_lst[all_target_lst != 0]
-        ])
-        
-        if predictions is not None:
-            all_pred_lst = predictions_np[sample_idx, :, :, :, 0].flatten()
-            all_lst_values = np.concatenate([
-                all_lst_values,
-                all_pred_lst[all_pred_lst != 0]
-            ])
-        
-        if len(all_lst_values) > 0:
-            # Use wider percentile range for better contrast
-            global_temp_min = np.percentile(all_lst_values, 1)  # 1st percentile
-            global_temp_max = np.percentile(all_lst_values, 99)  # 99th percentile
-            print(f"Global temp range: {global_temp_min:.1f}°F to {global_temp_max:.1f}°F")
+        # Calculate global temperature range using raw values
+        if len(all_temp_values) > 0:
+            all_temp_array = np.array(all_temp_values)
+            global_temp_min = np.percentile(all_temp_array, 2)
+            global_temp_max = np.percentile(all_temp_array, 98)
+            print(f"Global temperature range (2nd-98th percentile): {global_temp_min:.1f}°F to {global_temp_max:.1f}°F")
         else:
             global_temp_min, global_temp_max = 32, 100
             print("Warning: No valid temperature data found, using default range")
         
+        # Create visualizations for each timestep
         for t in range(n_timesteps):
-            # Input LST (band index 1)
-            input_lst = sample_input[t, :, :, 1]
-            target_lst = sample_target[t, :, :, 0]
+            # Input LST (raw values from TIFF)
+            input_lst_raw = sample_input[t, :, :, 1]
+            target_lst_raw = sample_target[t, :, :, 0]
             
-            # Mask nodata values properly
-            input_lst_masked = np.where(input_lst == 0, np.nan, input_lst)
-            target_lst_masked = np.where(target_lst == 0, np.nan, target_lst)
+            # Mask unreasonable values
+            input_reasonable = (input_lst_raw >= -50) & (input_lst_raw <= 150)
+            target_reasonable = (target_lst_raw >= -50) & (target_lst_raw <= 150)
+            
+            input_lst_masked = np.where(input_reasonable, input_lst_raw, np.nan)
+            target_lst_masked = np.where(target_reasonable, target_lst_raw, np.nan)
             
             # Plot input LST
             im1 = axes[t, 0].imshow(input_lst_masked, cmap='coolwarm', 
-                                   vmin=global_temp_min, vmax=global_temp_max)
-            axes[t, 0].set_title(f't={t}: Input LST (°F)\nRange: {np.nanmin(input_lst_masked):.1f}-{np.nanmax(input_lst_masked):.1f}°F')
+                                vmin=global_temp_min, vmax=global_temp_max)
+            valid_input_range = f"{np.nanmin(input_lst_masked):.1f}-{np.nanmax(input_lst_masked):.1f}"
+            axes[t, 0].set_title(f't={t}: Input LST (Raw TIFF)\nRange: {valid_input_range}°F')
             axes[t, 0].axis('off')
             cbar1 = plt.colorbar(im1, ax=axes[t, 0], fraction=0.046, pad=0.04)
             cbar1.set_label('Temperature (°F)')
             
             # Plot target LST
             im2 = axes[t, 1].imshow(target_lst_masked, cmap='coolwarm',
-                                   vmin=global_temp_min, vmax=global_temp_max)
-            axes[t, 1].set_title(f't={t}: Target LST (°F)\nRange: {np.nanmin(target_lst_masked):.1f}-{np.nanmax(target_lst_masked):.1f}°F')
+                                vmin=global_temp_min, vmax=global_temp_max)
+            valid_target_range = f"{np.nanmin(target_lst_masked):.1f}-{np.nanmax(target_lst_masked):.1f}"
+            axes[t, 1].set_title(f't={t}: Target LST (Raw TIFF)\nRange: {valid_target_range}°F')
             axes[t, 1].axis('off')
             cbar2 = plt.colorbar(im2, ax=axes[t, 1], fraction=0.046, pad=0.04)
             cbar2.set_label('Temperature (°F)')
             
             # Plot predicted LST if available
             if predictions is not None:
-                pred_lst = predictions_np[sample_idx, t, :, :, 0]
-                pred_lst_masked = np.where(pred_lst == 0, np.nan, pred_lst)
+                pred_lst_raw = predictions_np[sample_idx, t, :, :, 0]
+                pred_reasonable = (pred_lst_raw >= -50) & (pred_lst_raw <= 150)
+                pred_lst_masked = np.where(pred_reasonable, pred_lst_raw, np.nan)
+                
                 im3 = axes[t, 2].imshow(pred_lst_masked, cmap='coolwarm',
-                                       vmin=global_temp_min, vmax=global_temp_max)
-                axes[t, 2].set_title(f't={t}: Predicted LST (°F)\nRange: {np.nanmin(pred_lst_masked):.1f}-{np.nanmax(pred_lst_masked):.1f}°F')
+                                    vmin=global_temp_min, vmax=global_temp_max)
+                valid_pred_range = f"{np.nanmin(pred_lst_masked):.1f}-{np.nanmax(pred_lst_masked):.1f}"
+                axes[t, 2].set_title(f't={t}: Predicted LST (Raw)\nRange: {valid_pred_range}°F')
                 axes[t, 2].axis('off')
                 cbar3 = plt.colorbar(im3, ax=axes[t, 2], fraction=0.046, pad=0.04)
                 cbar3.set_label('Temperature (°F)')
         
         plt.tight_layout()
         return fig
-    
+
     def create_difference_visualization(self, targets: torch.Tensor, predictions: torch.Tensor,
-                                      sample_idx: int = 0) -> plt.Figure:
-        """Create visualization showing prediction errors in Fahrenheit"""
+                                    sample_idx: int = 0) -> plt.Figure:
+        """Create visualization showing prediction errors using raw values"""
         targets_np = targets.detach().cpu().numpy()
         predictions_np = predictions.detach().cpu().numpy()
         
-        # Calculate difference in Fahrenheit
+        # Calculate difference using raw values
         diff = predictions_np - targets_np
         
         sample_target = targets_np[sample_idx]  # (T, H, W, 1)
@@ -315,18 +358,26 @@ class LandsatLSTPredictor(pl.LightningModule):
         if n_timesteps == 1:
             axes = [axes]
         
+        print("=== PREDICTION ERROR ANALYSIS (Raw Values) ===")
+        
         for t in range(n_timesteps):
             diff_t = sample_diff[t, :, :, 0]
-            
-            # Mask nodata values
             target_t = sample_target[t, :, :, 0]
             pred_t = sample_pred[t, :, :, 0]
-            valid_mask = (target_t != 0) & (pred_t != 0)
+            
+            # Create mask for valid data (reasonable temperature range)
+            target_valid = (target_t >= -50) & (target_t <= 150)
+            pred_valid = (pred_t >= -50) & (pred_t <= 150)
+            valid_mask = target_valid & pred_valid
+            
             diff_t_masked = np.where(valid_mask, diff_t, np.nan)
             
             # Plot difference with symmetric colormap
             if not np.all(np.isnan(diff_t_masked)):
-                vmax = min(np.nanpercentile(np.abs(diff_t_masked), 95), 15)
+                # Use 95th percentile for better visualization of extreme errors
+                vmax = min(np.nanpercentile(np.abs(diff_t_masked), 95), 20)  # Cap at 20°F
+                if vmax < 1:  # Ensure minimum range
+                    vmax = 5
             else:
                 vmax = 10
             
@@ -336,18 +387,124 @@ class LandsatLSTPredictor(pl.LightningModule):
             cbar = plt.colorbar(im, ax=axes[t], fraction=0.046, pad=0.04)
             cbar.set_label('Temperature Error (°F)')
             
-            # Add statistics
+            # Calculate and display statistics
             if not np.all(np.isnan(diff_t_masked)):
-                mae = np.nanmean(np.abs(diff_t_masked))
-                rmse = np.sqrt(np.nanmean(diff_t_masked**2))
-                axes[t].text(0.02, 0.98, f'MAE: {mae:.1f}°F\nRMSE: {rmse:.1f}°F', 
-                           transform=axes[t].transAxes, verticalalignment='top',
-                           bbox=dict(boxstyle='round', facecolor='white', alpha=0.8),
-                           fontsize=10)
+                valid_errors = diff_t_masked[~np.isnan(diff_t_masked)]
+                mae = np.mean(np.abs(valid_errors))
+                rmse = np.sqrt(np.mean(valid_errors**2))
+                bias = np.mean(valid_errors)
+                
+                print(f"Timestep {t}: MAE={mae:.2f}°F, RMSE={rmse:.2f}°F, Bias={bias:.2f}°F")
+                
+                axes[t].text(0.02, 0.98, f'MAE: {mae:.1f}°F\nRMSE: {rmse:.1f}°F\nBias: {bias:.1f}°F', 
+                        transform=axes[t].transAxes, verticalalignment='top',
+                        bbox=dict(boxstyle='round', facecolor='white', alpha=0.8),
+                        fontsize=10)
         
         plt.tight_layout()
         return fig
+
+    def calculate_image_statistics(self, inputs: torch.Tensor, targets: torch.Tensor, 
+                                predictions: Optional[torch.Tensor] = None) -> Dict[str, Any]:
+        """Calculate comprehensive statistics using raw TIFF values"""
         
+        # Convert to numpy
+        inputs_np = inputs.detach().cpu().numpy()
+        targets_np = targets.detach().cpu().numpy()
+        
+        stats = {
+            'batch_size': inputs.shape[0],
+            'sequence_length': inputs.shape[1],
+            'spatial_dimensions': [inputs.shape[2], inputs.shape[3]],
+            'num_input_bands': inputs.shape[4],
+            'target_bands': targets.shape[4],
+        }
+        
+        # Input statistics (for each band) - use raw values
+        band_names = ['DEM', 'LST', 'Red', 'Green', 'Blue', 'NDVI', 'NDWI', 'NDBI', 'Albedo']
+        for i, band_name in enumerate(band_names):
+            if i < inputs.shape[4]:
+                band_data = inputs_np[:, :, :, :, i]
+                
+                if band_name == 'LST':
+                    # For LST, use reasonable temperature range
+                    valid_mask = (band_data >= -50) & (band_data <= 150)
+                    band_data_clean = band_data[valid_mask]
+                else:
+                    # For other bands, exclude zeros
+                    band_data_clean = band_data[band_data != 0]
+                
+                if len(band_data_clean) > 0:
+                    stats[f'{band_name.lower()}_min'] = float(np.min(band_data_clean))
+                    stats[f'{band_name.lower()}_max'] = float(np.max(band_data_clean))
+                    stats[f'{band_name.lower()}_mean'] = float(np.mean(band_data_clean))
+                    stats[f'{band_name.lower()}_std'] = float(np.std(band_data_clean))
+        
+        # Target statistics - use raw LST values
+        target_data = targets_np[:, :, :, :, 0]  # LST is the only target band
+        target_valid_mask = (target_data >= -50) & (target_data <= 150)
+        target_clean = target_data[target_valid_mask]
+        
+        if len(target_clean) > 0:
+            stats.update({
+                'target_lst_min_raw': float(np.min(target_clean)),
+                'target_lst_max_raw': float(np.max(target_clean)),
+                'target_lst_mean_raw': float(np.mean(target_clean)),
+                'target_lst_std_raw': float(np.std(target_clean))
+            })
+            
+            print(f"Target LST Statistics (Raw TIFF): Min={np.min(target_clean):.1f}°F, "
+                f"Max={np.max(target_clean):.1f}°F, Mean={np.mean(target_clean):.1f}°F")
+        
+        # Prediction statistics - use raw values
+        if predictions is not None:
+            pred_np = predictions.detach().cpu().numpy()
+            pred_data = pred_np[:, :, :, :, 0]
+            pred_valid_mask = (pred_data >= -50) & (pred_data <= 150)
+            pred_clean = pred_data[pred_valid_mask]
+            
+            if len(pred_clean) > 0:
+                stats.update({
+                    'pred_lst_min_raw': float(np.min(pred_clean)),
+                    'pred_lst_max_raw': float(np.max(pred_clean)),
+                    'pred_lst_mean_raw': float(np.mean(pred_clean)),
+                    'pred_lst_std_raw': float(np.std(pred_clean))
+                })
+                
+                print(f"Predicted LST Statistics (Raw): Min={np.min(pred_clean):.1f}°F, "
+                    f"Max={np.max(pred_clean):.1f}°F, Mean={np.mean(pred_clean):.1f}°F")
+                
+                # Error statistics using raw values
+                if len(target_clean) > 0:
+                    # Calculate errors on overlapping valid regions
+                    target_flat = target_data.flatten()
+                    pred_flat = pred_data.flatten()
+                    
+                    # Both target and prediction must be in valid range
+                    combined_valid_mask = ((target_flat >= -50) & (target_flat <= 150) & 
+                                        (pred_flat >= -50) & (pred_flat <= 150))
+                    
+                    if combined_valid_mask.sum() > 0:
+                        target_valid_combined = target_flat[combined_valid_mask]
+                        pred_valid_combined = pred_flat[combined_valid_mask]
+                        error = pred_valid_combined - target_valid_combined
+                        
+                        mae_raw = float(np.mean(np.abs(error)))
+                        rmse_raw = float(np.sqrt(np.mean(error**2)))
+                        bias_raw = float(np.mean(error))
+                        
+                        stats.update({
+                            'mae_raw_fahrenheit': mae_raw,
+                            'rmse_raw_fahrenheit': rmse_raw,
+                            'bias_raw_fahrenheit': bias_raw,
+                            'error_std_raw': float(np.std(error))
+                        })
+                        
+                        print(f"Error Statistics (Raw °F): MAE={mae_raw:.2f}°F, "
+                            f"RMSE={rmse_raw:.2f}°F, Bias={bias_raw:.2f}°F")
+        
+        return stats
+
     def extract_batch_metadata(self, batch_info: Any, batch_idx: int) -> Dict[str, Any]:
         """
         Extract metadata from the current batch.
@@ -507,88 +664,6 @@ class LandsatLSTPredictor(pl.LightningModule):
             table_data.append(row)
         
         return wandb.Table(columns=columns, data=table_data)
-    
-    def calculate_image_statistics(self, inputs: torch.Tensor, targets: torch.Tensor, 
-                                 predictions: Optional[torch.Tensor] = None) -> Dict[str, Any]:
-        """Calculate comprehensive statistics for the batch"""
-        
-        # Convert to numpy
-        inputs_np = inputs.detach().cpu().numpy()
-        targets_np = targets.detach().cpu().numpy()
-        
-        stats = {
-            'batch_size': inputs.shape[0],
-            'sequence_length': inputs.shape[1],
-            'spatial_dimensions': [inputs.shape[2], inputs.shape[3]],
-            'num_input_bands': inputs.shape[4],
-            'target_bands': targets.shape[4],
-        }
-        
-        # Input statistics (for each band)
-        band_names = ['DEM', 'LST', 'Red', 'Green', 'Blue', 'NDVI', 'NDWI', 'NDBI', 'Albedo']
-        for i, band_name in enumerate(band_names):
-            if i < inputs.shape[4]:
-                band_data = inputs_np[:, :, :, :, i]
-                band_data_clean = band_data[band_data != 0]  # Remove nodata
-                
-                if len(band_data_clean) > 0:
-                    stats[f'{band_name.lower()}_min'] = float(np.min(band_data_clean))
-                    stats[f'{band_name.lower()}_max'] = float(np.max(band_data_clean))
-                    stats[f'{band_name.lower()}_mean'] = float(np.mean(band_data_clean))
-                    stats[f'{band_name.lower()}_std'] = float(np.std(band_data_clean))
-        
-        # Target statistics
-        target_data = targets_np[:, :, :, :, 0]  # LST is the only target band
-        target_clean = target_data[target_data != 0]
-        
-        if len(target_clean) > 0:
-            stats.update({
-                'target_lst_min': float(np.min(target_clean)),
-                'target_lst_max': float(np.max(target_clean)),
-                'target_lst_mean': float(np.mean(target_clean)),
-                'target_lst_std': float(np.std(target_clean))
-            })
-        
-        # Prediction statistics
-        if predictions is not None:
-            pred_np = predictions.detach().cpu().numpy()
-            pred_data = pred_np[:, :, :, :, 0]
-            pred_clean = pred_data[pred_data != 0]
-            
-            if len(pred_clean) > 0:
-                stats.update({
-                    'pred_lst_min': float(np.min(pred_clean)),
-                    'pred_lst_max': float(np.max(pred_clean)),
-                    'pred_lst_mean': float(np.mean(pred_clean)),
-                    'pred_lst_std': float(np.std(pred_clean))
-                })
-                
-                # Error statistics - ensure same shape
-                if len(target_clean) > 0 and len(pred_clean) == len(target_clean):
-                    error = pred_clean - target_clean
-                    stats.update({
-                        'mae': float(np.mean(np.abs(error))),
-                        'rmse': float(np.sqrt(np.mean(error**2))),
-                        'bias': float(np.mean(error)),
-                        'error_std': float(np.std(error))
-                    })
-                elif len(target_clean) > 0 and len(pred_clean) > 0:
-                    # If shapes don't match, calculate on whole arrays
-                    pred_whole = pred_np.flatten()
-                    target_whole = targets_np.flatten()
-                    valid_mask = (pred_whole != 0) & (target_whole != 0)
-                    if valid_mask.sum() > 0:
-                        pred_valid = pred_whole[valid_mask]
-                        target_valid = target_whole[valid_mask]
-                        error = pred_valid - target_valid
-                        stats.update({
-                            'mae': float(np.mean(np.abs(error))),
-                            'rmse': float(np.sqrt(np.mean(error**2))),
-                            'bias': float(np.mean(error)),
-                            'error_std': float(np.std(error))
-                        })
-        
-        return stats
     
     def log_images_to_wandb(self, inputs: torch.Tensor, targets: torch.Tensor,
                            predictions: Optional[torch.Tensor] = None,
