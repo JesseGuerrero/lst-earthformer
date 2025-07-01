@@ -21,10 +21,10 @@ class LandsatSequenceDataset(Dataset):
         test_cities: Optional[List[str]] = None
     ):
         """
-        Dataset for Landsat sequence prediction
+        Dataset for Landsat sequence prediction using tiled data
         
         Args:
-            dataset_root: Path to Dataset folder
+            dataset_root: Path to Dataset folder containing Cities_Tiles and DEM_2014_Tiles
             sequence_length: Number of consecutive months (input=3, output=3)
             split: 'train', 'val', or 'test'
             train_cities/val_cities/test_cities: City lists for each split
@@ -57,27 +57,49 @@ class LandsatSequenceDataset(Dataset):
         else:
             self.cities = self.test_cities
         
-        # Band order: DEM, LST, red, green, blue, ndvi, ndwi, ndbi, albedo
-        self.band_files = ['DEM.tif', 'LST.tif', 'red.tif', 'green.tif', 'blue.tif', 
-                          'ndvi.tif', 'ndwi.tif', 'ndbi.tif', 'albedo.tif']
+        # Band names (for tiled files)
+        self.band_names = ['DEM', 'LST', 'red', 'green', 'blue', 'ndvi', 'ndwi', 'ndbi', 'albedo']
         
-        # Build sequences
-        self.sequences = self._build_sequences()
+        # Build tile sequences
+        self.tile_sequences = self._build_tile_sequences()
         
-        print(f"{split} split: {len(self.cities)} cities, {len(self.sequences)} sequences")
+        print(f"{split} split: {len(self.cities)} cities, {len(self.tile_sequences)} tile sequences")
     
     def _get_all_cities(self) -> List[str]:
-        """Get all available cities from the dataset"""
-        cities_dir = self.dataset_root / "Cities_Preprocessed"
+        """Get all available cities from the tiled dataset"""
+        cities_dir = self.dataset_root / "Cities_Tiles"
         cities = [d.name for d in cities_dir.iterdir() if d.is_dir()]
         return sorted(cities)
     
+    def _get_available_tiles(self, city: str) -> Dict[Tuple[int, int], bool]:
+        """
+        Get all available tile positions for a city
+        Returns: {(row, col): True} for available tiles
+        """
+        # Check DEM tiles first to get available tile positions
+        dem_dir = self.dataset_root / "DEM_2014_Tiles" / city
+        available_tiles = {}
+        
+        if dem_dir.exists():
+            for dem_file in dem_dir.glob("DEM_row_*_col_*.tif"):
+                # Parse row and col from filename: DEM_row_000_col_001.tif
+                parts = dem_file.stem.split('_')
+                if len(parts) >= 4:
+                    try:
+                        row = int(parts[2])
+                        col = int(parts[4])
+                        available_tiles[(row, col)] = True
+                    except ValueError:
+                        continue
+        
+        return available_tiles
+    
     def _get_monthly_scenes(self, city: str) -> Dict[str, str]:
         """
-        Get one scene per month for a city
+        Get one scene per month for a city from tiled data
         Returns: {YYYY-MM: scene_path}
         """
-        city_dir = self.dataset_root / "Cities_Preprocessed" / city
+        city_dir = self.dataset_root / "Cities_Tiles" / city
         if not city_dir.exists():
             return {}
         
@@ -95,8 +117,8 @@ class LandsatSequenceDataset(Dataset):
                 
                 # Only keep first scene per month
                 if month_key not in monthly_scenes:
-                    # Verify all required files exist
-                    if self._validate_scene(scene_dir):
+                    # Verify scene has tiles
+                    if self._validate_tiled_scene(scene_dir):
                         monthly_scenes[month_key] = str(scene_dir)
                         
             except Exception as e:
@@ -105,24 +127,24 @@ class LandsatSequenceDataset(Dataset):
         
         return monthly_scenes
     
-    def _validate_scene(self, scene_dir: Path) -> bool:
-        """Check if scene has all required files (except DEM)"""
-        required_files = ['LST.tif', 'red.tif', 'green.tif', 'blue.tif', 
-                         'ndvi.tif', 'ndwi.tif', 'ndbi.tif', 'albedo.tif']
-        
-        for file_name in required_files:
-            if not (scene_dir / file_name).exists():
-                return False
-        return True
+    def _validate_tiled_scene(self, scene_dir: Path) -> bool:
+        """Check if scene has tile files"""
+        # Check if there are any .tif files in the scene directory
+        tif_files = list(scene_dir.glob("*.tif"))
+        return len(tif_files) > 0
     
-    def _build_sequences(self) -> List[Tuple[str, List[str], List[str]]]:
+    def _build_tile_sequences(self) -> List[Tuple[str, int, int, List[str], List[str]]]:
         """
-        Build consecutive monthly sequences
-        Returns: List of (city, input_months, output_months)
+        Build consecutive monthly sequences for each tile position
+        Returns: List of (city, tile_row, tile_col, input_months, output_months)
         """
         sequences = []
         
         for city in self.cities:
+            # Get available tile positions for this city
+            available_tiles = self._get_available_tiles(city)
+            
+            # Get monthly scenes
             monthly_scenes = self._get_monthly_scenes(city)
             
             if len(monthly_scenes) < 2 * self.sequence_length:
@@ -131,16 +153,37 @@ class LandsatSequenceDataset(Dataset):
             # Sort months chronologically
             sorted_months = sorted(monthly_scenes.keys())
             
-            # Find consecutive sequences
-            for i in range(len(sorted_months) - 2 * self.sequence_length + 1):
-                input_months = sorted_months[i:i + self.sequence_length]
-                output_months = sorted_months[i + self.sequence_length:i + 2 * self.sequence_length]
-                
-                # Verify months are consecutive
-                if self._are_consecutive_months(input_months + output_months):
-                    sequences.append((city, input_months, output_months))
+            # For each tile position
+            for (tile_row, tile_col) in available_tiles.keys():
+                # Find consecutive sequences for this tile
+                for i in range(len(sorted_months) - 2 * self.sequence_length + 1):
+                    input_months = sorted_months[i:i + self.sequence_length]
+                    output_months = sorted_months[i + self.sequence_length:i + 2 * self.sequence_length]
+                    
+                    # Verify months are consecutive
+                    if self._are_consecutive_months(input_months + output_months):
+                        # Verify all required tiles exist for this sequence
+                        if self._verify_tile_sequence_exists(city, tile_row, tile_col, input_months + output_months):
+                            sequences.append((city, tile_row, tile_col, input_months, output_months))
         
         return sequences
+    
+    def _verify_tile_sequence_exists(self, city: str, tile_row: int, tile_col: int, months: List[str]) -> bool:
+        """Verify that all required tiles exist for a sequence"""
+        monthly_scenes = self._get_monthly_scenes(city)
+        
+        for month in months:
+            if month not in monthly_scenes:
+                return False
+            
+            scene_dir = Path(monthly_scenes[month])
+            
+            # Check if LST tile exists (minimum requirement)
+            lst_tile = scene_dir / f"LST_row_{tile_row:03d}_col_{tile_col:03d}.tif"
+            if not lst_tile.exists():
+                return False
+        
+        return True
     
     def _are_consecutive_months(self, months: List[str]) -> bool:
         """Check if months are consecutive"""
@@ -179,28 +222,28 @@ class LandsatSequenceDataset(Dataset):
             print(f"Error loading {file_path}: {e}")
             return np.zeros((128, 128), dtype=np.float32)
     
-    def _load_dem(self, city: str) -> np.ndarray:
-        """Load DEM for the city"""
-        dem_path = self.dataset_root / "DEM_2014_Preprocessed" / city / "DEM.tif"
+    def _load_dem_tile(self, city: str, tile_row: int, tile_col: int) -> np.ndarray:
+        """Load DEM tile for the city and position"""
+        dem_path = self.dataset_root / "DEM_2014_Tiles" / city / f"DEM_row_{tile_row:03d}_col_{tile_col:03d}.tif"
         return self._load_raster(str(dem_path))
     
-    def _load_scene(self, city: str, month: str) -> np.ndarray:
+    def _load_scene_tile(self, city: str, month: str, tile_row: int, tile_col: int) -> np.ndarray:
         """
-        Load all bands for a scene
+        Load all bands for a scene tile
         Returns: (H, W, 9) array with bands in order: DEM, LST, red, green, blue, ndvi, ndwi, ndbi, albedo
         """
         monthly_scenes = self._get_monthly_scenes(city)
         scene_dir = Path(monthly_scenes[month])
         
-        # Load DEM (constant for city)
-        dem = self._load_dem(city)
+        # Load DEM (constant for city/tile position)
+        dem = self._load_dem_tile(city, tile_row, tile_col)
         
         # Load other bands
         bands = [dem]  # Start with DEM
         
-        for band_file in self.band_files[1:]:  # Skip DEM.tif since we loaded it separately
-            band_path = scene_dir / band_file
-            band_data = self._load_raster(str(band_path))
+        for band_name in self.band_names[1:]:  # Skip DEM since we loaded it separately
+            tile_path = scene_dir / f"{band_name}_row_{tile_row:03d}_col_{tile_col:03d}.tif"
+            band_data = self._load_raster(str(tile_path))
             bands.append(band_data)
         
         # Stack to (H, W, C)
@@ -208,7 +251,7 @@ class LandsatSequenceDataset(Dataset):
         return scene_data
     
     def __len__(self) -> int:
-        return len(self.sequences)
+        return len(self.tile_sequences)
     
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -216,18 +259,18 @@ class LandsatSequenceDataset(Dataset):
             input_sequence: (T, H, W, C) = (3, 128, 128, 9)
             target_sequence: (T, H, W, 1) = (3, 128, 128, 1) - LST only
         """
-        city, input_months, output_months = self.sequences[idx]
+        city, tile_row, tile_col, input_months, output_months = self.tile_sequences[idx]
         
         # Load input sequence
         input_scenes = []
         for month in input_months:
-            scene = self._load_scene(city, month)
+            scene = self._load_scene_tile(city, month, tile_row, tile_col)
             input_scenes.append(scene)
         
         # Load output sequence (LST only)
         output_scenes = []
         for month in output_months:
-            scene = self._load_scene(city, month)
+            scene = self._load_scene_tile(city, month, tile_row, tile_col)
             lst_only = scene[:, :, 1:2]  # LST is index 1, keep dims
             output_scenes.append(lst_only)
         
@@ -320,24 +363,36 @@ class LandsatDataModule(pl.LightningDataModule):
         )
 
 
-# Example usage
+# Example usage and testing
 if __name__ == "__main__":
-    # Test the dataloader
+    # Test the tiled dataloader
+    print("Testing tiled dataset...")
+    
     data_module = LandsatDataModule(
         dataset_root="./Data/Dataset",
         batch_size=2,
-        num_workers=2,
+        num_workers=0,  # Use 0 for debugging
         sequence_length=3
     )
     
+    print("Setting up data module...")
     data_module.setup("fit")
     
-    # Test a batch
+    print("Creating train dataloader...")
     train_loader = data_module.train_dataloader()
+    
+    print(f"Number of training batches: {len(train_loader)}")
+    
+    # Test a few batches
+    print("Testing batches...")
     for batch_idx, (inputs, targets) in enumerate(train_loader):
         print(f"Batch {batch_idx}:")
         print(f"  Input shape: {inputs.shape}")   # Should be (B, T, H, W, C) = (2, 3, 128, 128, 9)
         print(f"  Target shape: {targets.shape}") # Should be (B, T, H, W, 1) = (2, 3, 128, 128, 1)
+        print(f"  Input range: {inputs.min().item():.3f} to {inputs.max().item():.3f}")
+        print(f"  Target range: {targets.min().item():.3f} to {targets.max().item():.3f}")
         
         if batch_idx == 2:  # Test a few batches
             break
+    
+    print("✅ Tiled dataset test completed successfully!")
