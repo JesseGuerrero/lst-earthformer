@@ -23,6 +23,7 @@
 - [ ] Personalized urban feature clustering
 
 ## TODO
-- [ ] Setup data loader for temporal coverage, do  (Just do the years you have)
+- [x] Setup data loader for temporal coverage, do  (Just do the years you have)
 - [ ] Implement average between time points/months
-- [ ] Look up urban features to use for clustering (Do not implement, just propose back to her the features)
+- [ ] Look up urban features to use for clustering (Do not implement, just propose back to her the features).
+- [ ] Look up if average between time points/months is normal

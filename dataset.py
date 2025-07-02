@@ -14,7 +14,8 @@ class LandsatSequenceDataset(Dataset):
     def __init__(
         self, 
         dataset_root: str,
-        sequence_length: int = 3,
+        input_sequence_length: int = 3,     # Changed from sequence_length
+        output_sequence_length: int = 3,    # New parameter
         split: str = 'train',
         train_years: Optional[List[int]] = None,
         val_years: Optional[List[int]] = None,
@@ -35,7 +36,9 @@ class LandsatSequenceDataset(Dataset):
             debug_year: Year to use for debug monthly splits (default: 2014)
         """
         self.dataset_root = Path(dataset_root)
-        self.sequence_length = sequence_length
+        self.input_sequence_length = input_sequence_length      # Updated
+        self.output_sequence_length = output_sequence_length    # New
+        self.total_sequence_length = input_sequence_length + output_sequence_length  # New
         self.split = split
         self.debug_monthly_split = debug_monthly_split
         self.debug_year = debug_year
@@ -216,44 +219,35 @@ class LandsatSequenceDataset(Dataset):
         sequences = []
         
         if self.debug_monthly_split:
-            month_stats = {month: 0 for month in self.allowed_months}  # Track sequences per month
+            month_stats = {month: 0 for month in self.allowed_months}
         else:
-            year_stats = {year: 0 for year in self.years}  # Track sequences per year
+            year_stats = {year: 0 for year in self.years}
         
         for city in self.cities:
-            # Get available tile positions for this city
             available_tiles = self._get_available_tiles(city)
-            
-            # Get monthly scenes (already filtered by years/months)
             monthly_scenes = self._get_monthly_scenes(city)
             
-            if len(monthly_scenes) < 2 * self.sequence_length:
+            if len(monthly_scenes) < self.total_sequence_length:  # Updated
                 continue
             
-            # Sort months chronologically
             sorted_months = sorted(monthly_scenes.keys())
             
-            # For each tile position
             for (tile_row, tile_col) in available_tiles.keys():
-                # Find consecutive sequences for this tile
-                for i in range(len(sorted_months) - 2 * self.sequence_length + 1):
-                    input_months = sorted_months[i:i + self.sequence_length]
-                    output_months = sorted_months[i + self.sequence_length:i + 2 * self.sequence_length]
+                # Updated loop range to use configurable lengths
+                for i in range(len(sorted_months) - self.total_sequence_length + 1):
+                    input_months = sorted_months[i:i + self.input_sequence_length]
+                    output_months = sorted_months[i + self.input_sequence_length:i + self.total_sequence_length]
                     
-                    # Verify months are consecutive
                     if self._are_consecutive_months(input_months + output_months):
-                        # Verify all required tiles exist for this sequence
                         if self._verify_tile_sequence_exists(city, tile_row, tile_col, input_months + output_months):
                             sequences.append((city, tile_row, tile_col, input_months, output_months))
                             
-                            # Track statistics
+                            # Track statistics (same logic as before)
                             if self.debug_monthly_split:
-                                # Track by first input month
                                 first_month = int(input_months[0].split('-')[1])
                                 if first_month in month_stats:
                                     month_stats[first_month] += 1
                             else:
-                                # Track by first input year
                                 first_year = int(input_months[0].split('-')[0])
                                 if first_year in year_stats:
                                     year_stats[first_year] += 1
@@ -360,8 +354,8 @@ class LandsatSequenceDataset(Dataset):
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Returns:
-            input_sequence: (T, H, W, C) = (3, 128, 128, 9)
-            target_sequence: (T, H, W, 1) = (3, 128, 128, 1) - LST only
+            input_sequence: (T_in, H, W, C) = (input_sequence_length, 128, 128, 9)
+            target_sequence: (T_out, H, W, 1) = (output_sequence_length, 128, 128, 1) - LST only
         """
         city, tile_row, tile_col, input_months, output_months = self.tile_sequences[idx]
         
@@ -379,8 +373,8 @@ class LandsatSequenceDataset(Dataset):
             output_scenes.append(lst_only)
         
         # Convert to tensors
-        input_tensor = torch.from_numpy(np.stack(input_scenes, axis=0))  # (T, H, W, C)
-        target_tensor = torch.from_numpy(np.stack(output_scenes, axis=0))  # (T, H, W, 1)
+        input_tensor = torch.from_numpy(np.stack(input_scenes, axis=0))   # (T_in, H, W, C)
+        target_tensor = torch.from_numpy(np.stack(output_scenes, axis=0))  # (T_out, H, W, 1)
         
         return input_tensor, target_tensor
 
@@ -392,7 +386,8 @@ class LandsatDataModule(pl.LightningDataModule):
         dataset_root: str,
         batch_size: int = 4,
         num_workers: int = 4,
-        sequence_length: int = 3,
+        input_sequence_length: int = 3,     # Changed from sequence_length
+        output_sequence_length: int = 3,  
         train_years: Optional[List[int]] = None,
         val_years: Optional[List[int]] = None,
         test_years: Optional[List[int]] = None,
@@ -404,7 +399,8 @@ class LandsatDataModule(pl.LightningDataModule):
         self.dataset_root = dataset_root
         self.batch_size = batch_size
         self.num_workers = num_workers
-        self.sequence_length = sequence_length
+        self.input_sequence_length = input_sequence_length      # Updated
+        self.output_sequence_length = output_sequence_length
         self.train_years = train_years
         self.val_years = val_years
         self.test_years = test_years
@@ -416,7 +412,8 @@ class LandsatDataModule(pl.LightningDataModule):
         if stage == "fit" or stage is None:
             self.train_dataset = LandsatSequenceDataset(
                 self.dataset_root,
-                sequence_length=self.sequence_length,
+                input_sequence_length=self.input_sequence_length,   # Updated
+                output_sequence_length=self.output_sequence_length, # New
                 split='train',
                 train_years=self.train_years,
                 val_years=self.val_years,
@@ -427,7 +424,8 @@ class LandsatDataModule(pl.LightningDataModule):
             
             self.val_dataset = LandsatSequenceDataset(
                 self.dataset_root,
-                sequence_length=self.sequence_length,
+                input_sequence_length=self.input_sequence_length,   # Updated
+                output_sequence_length=self.output_sequence_length, # New
                 split='val',
                 train_years=self.train_years,
                 val_years=self.val_years,
@@ -439,7 +437,8 @@ class LandsatDataModule(pl.LightningDataModule):
         if stage == "test" or stage is None:
             self.test_dataset = LandsatSequenceDataset(
                 self.dataset_root,
-                sequence_length=self.sequence_length,
+                input_sequence_length=self.input_sequence_length,   # Updated
+                output_sequence_length=self.output_sequence_length, # New
                 split='test',
                 train_years=self.train_years,
                 val_years=self.val_years,
@@ -447,6 +446,7 @@ class LandsatDataModule(pl.LightningDataModule):
                 debug_monthly_split=self.debug_monthly_split,
                 debug_year=self.debug_year
             )
+
     
     def train_dataloader(self):
         return DataLoader(

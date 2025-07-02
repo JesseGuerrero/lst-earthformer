@@ -18,10 +18,16 @@ class LandsatLSTPredictor(pl.LightningModule):
         max_epochs: int = 100,
         log_images_every_n_epochs: int = 5,
         max_images_to_log: int = 4,
+        input_sequence_length: int = 3,     # New parameter
+        output_sequence_length: int = 3,    # New parameter
         **model_kwargs
     ):
         super().__init__()
         self.save_hyperparameters()
+
+        # Store sequence lengths
+        self.input_sequence_length = input_sequence_length
+        self.output_sequence_length = output_sequence_length
         
         # Image logging parameters
         self.log_images_every_n_epochs = log_images_every_n_epochs
@@ -32,8 +38,8 @@ class LandsatLSTPredictor(pl.LightningModule):
         
         # Default Landsat-optimized config
         self.model_config = {
-            'input_shape': (3, 128, 128, 9),  # 3 timesteps, 128x128, 9 bands
-            'target_shape': (3, 128, 128, 1), # 3 timesteps, LST only
+            'input_shape': (input_sequence_length, 128, 128, 9),  # input_sequence timesteps, 128x128, 9 bands
+            'target_shape': (output_sequence_length, 128, 128, 1), # output_sequence timesteps, LST only
             'base_units': 96,
             'num_heads': 6,
             'enc_depth': [2, 2],
