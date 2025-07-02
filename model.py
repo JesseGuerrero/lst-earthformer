@@ -99,12 +99,12 @@ class LandsatLSTPredictor(pl.LightningModule):
             axes = axes.reshape(1, -1)
         
         for sample_idx in range(batch_size):
-            # Get middle timestep for visualization (t=1 out of 0,1,2)
-            middle_t = 1
+            middle_t = min(1, inputs_np.shape[1] - 1)  # Handle case where sequence length < 2
+            output_middle_t = min(1, targets_np.shape[1] - 1)
             
             # Extract data for this sample and timestep
             sample_input = inputs_np[sample_idx, middle_t]  # (H, W, C)
-            sample_target = targets_np[sample_idx, middle_t, :, :, 0]  # (H, W)
+            sample_target = targets_np[sample_idx, output_middle_t, :, :, 0]  # Use output_middle_t
             
             # === RGB VISUALIZATION (properly scaled) ===
             # Unscale RGB bands (indices 2, 3, 4) from int16 to reflectance [0, 1]
@@ -219,7 +219,9 @@ class LandsatLSTPredictor(pl.LightningModule):
         sample_input = inputs_np[sample_idx]  # (T, H, W, C)
         sample_target = targets_np[sample_idx]  # (T, H, W, 1)
         
-        n_timesteps = sample_input.shape[0]
+        input_timesteps = sample_input.shape[0]
+        target_timesteps = sample_target.shape[0]
+        n_timesteps = max(input_timesteps, target_timesteps)
         n_cols = 3 if predictions is not None else 2
         
         fig, axes = plt.subplots(n_timesteps, n_cols, figsize=(4*n_cols, 3*n_timesteps))
@@ -646,15 +648,28 @@ class LandsatLSTPredictor(pl.LightningModule):
         return wandb.Table(columns=columns, data=table_data)
     
     def log_images_to_wandb(self, inputs: torch.Tensor, targets: torch.Tensor,
-                           predictions: Optional[torch.Tensor] = None,
-                           stage: str = "train", batch_idx: int = 0):
+                       predictions: Optional[torch.Tensor] = None,
+                       stage: str = "train", batch_idx: int = 0):
         """Enhanced image logging with comprehensive metadata"""
         if not isinstance(self.logger, pl.loggers.WandbLogger):
             return
         
         try:
+            # Add debug info about tensor shapes and ranges
+            print(f"=== DEBUG: {stage} batch {batch_idx} ===")
+            print(f"Input shape: {inputs.shape}")
+            print(f"Target shape: {targets.shape}")
+            if predictions is not None:
+                print(f"Prediction shape: {predictions.shape}")
+                print(f"Target range: {targets.min().item():.1f} to {targets.max().item():.1f}")
+                print(f"Prediction range: {predictions.min().item():.1f} to {predictions.max().item():.1f}")
+            
             # Extract metadata for this batch
-            metadata = self.extract_batch_metadata(None, batch_idx)
+            try:
+                metadata = self.extract_batch_metadata(None, batch_idx)
+            except Exception as meta_error:
+                print(f"Warning: Failed to extract metadata: {meta_error}")
+                metadata = {'samples_metadata': []}
             
             # Calculate statistics with error handling
             try:
@@ -720,20 +735,22 @@ class LandsatLSTPredictor(pl.LightningModule):
                 
                 # Create temporal sequence for first sample with metadata
                 try:
-                    if inputs.shape[0] > 0 and metadata.get('samples_metadata'):
+                    if inputs.shape[0] > 0:
                         fig2 = self.create_temporal_sequence_viz(inputs, targets, predictions, sample_idx=0)
                         
-                        first_sample = metadata['samples_metadata'][0]
-                        temporal_caption = (
-                            f"{stage} Temporal Sequence - Epoch {self.current_epoch}\n"
-                            f"City: {first_sample['city']}, Tile: {first_sample['tile_position']}\n"
-                            f"Input: {first_sample['input_date_range']}\n"
-                            f"Output: {first_sample['output_date_range']}"
-                        )
+                        if metadata.get('samples_metadata'):
+                            first_sample = metadata['samples_metadata'][0]
+                            temporal_caption = (
+                                f"{stage} Temporal Sequence - Epoch {self.current_epoch}\n"
+                                f"City: {first_sample['city']}, Tile: {first_sample['tile_position']}\n"
+                                f"Input: {first_sample['input_date_range']}\n"
+                                f"Output: {first_sample['output_date_range']}"
+                            )
+                        else:
+                            temporal_caption = f"{stage} Temporal Sequence - Epoch {self.current_epoch}"
                         
                         self.logger.experiment.log({
                             f"{stage}_temporal_sequence": wandb.Image(fig2, caption=temporal_caption),
-                            f"{stage}_temporal_metadata": first_sample
                         }, step=self.global_step)
                         
                         plt.close(fig2)
@@ -742,12 +759,17 @@ class LandsatLSTPredictor(pl.LightningModule):
                         if predictions is not None:
                             try:
                                 fig3 = self.create_difference_visualization(targets, predictions, sample_idx=0)
-                                error_caption = (
-                                    f"{stage} Prediction Errors - Epoch {self.current_epoch}\n"
-                                    f"City: {first_sample['city']}, Tile: {first_sample['tile_position']}\n"
-                                    f"MAE: {stats.get('mae', 'N/A'):.2f}°F, "
-                                    f"RMSE: {stats.get('rmse', 'N/A'):.2f}°F"
-                                )
+                                
+                                if metadata.get('samples_metadata'):
+                                    first_sample = metadata['samples_metadata'][0]
+                                    error_caption = (
+                                        f"{stage} Prediction Errors - Epoch {self.current_epoch}\n"
+                                        f"City: {first_sample['city']}, Tile: {first_sample['tile_position']}\n"
+                                        f"MAE: {stats.get('mae_raw_fahrenheit', 'N/A'):.2f}°F, "
+                                        f"RMSE: {stats.get('rmse_raw_fahrenheit', 'N/A'):.2f}°F"
+                                    )
+                                else:
+                                    error_caption = f"{stage} Prediction Errors - Epoch {self.current_epoch}"
                                 
                                 self.logger.experiment.log({
                                     f"{stage}_prediction_errors": wandb.Image(fig3, caption=error_caption)
@@ -759,6 +781,21 @@ class LandsatLSTPredictor(pl.LightningModule):
                                 
                 except Exception as temporal_error:
                     print(f"Warning: Failed to create temporal visualizations: {temporal_error}")
+            
+            else:
+                # If main visualization failed, log basic info
+                print("Main visualization failed, logging basic tensor info")
+                self.logger.experiment.log({
+                    f"{stage}_tensor_info": {
+                        "input_shape": list(inputs.shape),
+                        "target_shape": list(targets.shape),
+                        "prediction_shape": list(predictions.shape) if predictions is not None else None,
+                        "target_min": float(targets.min().item()),
+                        "target_max": float(targets.max().item()),
+                        "prediction_min": float(predictions.min().item()) if predictions is not None else None,
+                        "prediction_max": float(predictions.max().item()) if predictions is not None else None,
+                    }
+                }, step=self.global_step)
         
         except Exception as e:
             print(f"Warning: Failed to log images to wandb: {e}")
@@ -783,6 +820,10 @@ class LandsatLSTPredictor(pl.LightningModule):
         
         # Forward pass
         predictions = self.forward(inputs)
+        with torch.no_grad():
+            print(f"Target range: {targets.min().item():.1f} to {targets.max().item():.1f}")
+            print(f"Prediction range: {predictions.min().item():.1f} to {predictions.max().item():.1f}")
+            print(f"Input LST range: {inputs[:,:,:,:,1].min().item():.1f} to {inputs[:,:,:,:,1].max().item():.1f}")
         
         # Calculate loss
         loss = self.criterion(predictions, targets)

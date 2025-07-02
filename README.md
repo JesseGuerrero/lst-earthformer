@@ -25,7 +25,7 @@
 ## TODO
 - [x] Setup data loader for temporal coverage, do  (Just do the years you have)
 - [x] Implement average between time points/months
-- [ ] Implement mixed precision
+- [x] Implement mixed precision
 - [ ] Look up urban features to use for clustering (Do not implement, just propose back to her the features).
 - [ ] Look up if average between time points/months is normal
 
