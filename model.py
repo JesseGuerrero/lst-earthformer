@@ -57,12 +57,8 @@ class LandsatLSTPredictor(pl.LightningModule):
         self.model_config.update(model_kwargs)
         
         # Initialize model - Import here to avoid issues
-        try:
-            from earthformer.cuboid_transformer.cuboid_transformer import CuboidTransformerModel
-            self.model = CuboidTransformerModel(**self.model_config)
-        except ImportError:
-            print("Warning: Could not import CuboidTransformerModel. Using dummy model for testing.")
-            self.model = self._create_dummy_model()
+        from earthformer.cuboid_transformer.cuboid_transformer import CuboidTransformerModel
+        self.model = CuboidTransformerModel(**self.model_config)
         
         # Loss function
         self.criterion = nn.MSELoss()
@@ -72,28 +68,6 @@ class LandsatLSTPredictor(pl.LightningModule):
                           'NDVI (×10k)', 'NDWI (×10k)', 'NDBI (×10k)', 'Albedo (×10k)']
         
         print(f"Model initialized with {sum(p.numel() for p in self.model.parameters()):,} parameters")
-    
-    def _create_dummy_model(self):
-        """Create a dummy model for testing when EarthFormer is not available"""
-        class DummyModel(nn.Module):
-            def __init__(self):
-                super().__init__()
-                # Simple CNN for testing
-                self.conv1 = nn.Conv3d(9, 32, kernel_size=(1, 3, 3), padding=(0, 1, 1))
-                self.conv2 = nn.Conv3d(32, 16, kernel_size=(1, 3, 3), padding=(0, 1, 1))
-                self.conv3 = nn.Conv3d(16, 1, kernel_size=(1, 1, 1))
-                
-            def forward(self, x):
-                # x shape: (B, T, H, W, C) -> need to convert to (B, C, T, H, W)
-                x = x.permute(0, 4, 1, 2, 3)
-                x = torch.relu(self.conv1(x))
-                x = torch.relu(self.conv2(x))
-                x = self.conv3(x)
-                # Convert back to (B, T, H, W, C)
-                x = x.permute(0, 2, 3, 4, 1)
-                return x
-        
-        return DummyModel()
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through the model"""
