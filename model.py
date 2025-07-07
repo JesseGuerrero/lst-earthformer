@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from typing import Dict, Any, Tuple, Optional, List
 from pathlib import Path
+from dataset import BAND_RANGES
 
 class LandsatLSTPredictor(pl.LightningModule):
     def __init__(
@@ -157,7 +158,11 @@ class LandsatLSTPredictor(pl.LightningModule):
             # === LST VISUALIZATION - USE RAW VALUES ===
             # The LST TIFF already contains temperature in the correct units
             # No scaling needed - use the raw integer values directly
-            lst_target_raw = sample_target.copy()
+            lst_target_norm = sample_target.copy()
+            # Denormalize LST for visualization
+            lst_range = BAND_RANGES["LST"]  # You'll need to import this
+            lst_target_raw = lst_target_norm * (lst_range["max"] - lst_range["min"]) + lst_range["min"]
+
             
             # Only mask true nodata values (typically 0 or specific nodata value)
             # Check for reasonable temperature ranges to identify nodata

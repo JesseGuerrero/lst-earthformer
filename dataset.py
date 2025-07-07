@@ -10,6 +10,18 @@ from pathlib import Path
 import glob
 from collections import defaultdict
 
+BAND_RANGES = {
+    "DEM": {"min": 9899.0, "max": 13110.0},
+    "LST": {"min": -189.0, "max": 211.0},
+    "red": {"min": 1.0, "max": 10000.0},
+    "green": {"min": 1.0, "max": 10000.0},
+    "blue": {"min": 1.0, "max": 10000.0},
+    "ndvi": {"min": -10000.0, "max": 10000.0},
+    "ndwi": {"min": -10000.0, "max": 10000.0},
+    "ndbi": {"min": -10000.0, "max": 10000.0},
+    "albedo": {"min": 1.0, "max": 9980.0}
+}
+
 class LandsatSequenceDataset(Dataset):
     def __init__(
         self, 
@@ -66,6 +78,24 @@ class LandsatSequenceDataset(Dataset):
             print(f"{split} split: {len(self.cities)} cities, {len(self.years)} years "
                   f"({min(self.years)}-{max(self.years)}), {len(self.tile_sequences)} tile sequences")
     
+    def _normalize_scene(self, scene_data: np.ndarray) -> np.ndarray:
+        """Normalize scene data to [0, 1] range using predefined ranges"""
+        normalized_scene = scene_data.copy()
+        
+        for i, band_name in enumerate(self.band_names):
+            band_data = scene_data[:, :, i]
+            band_range = BAND_RANGES[band_name]
+            
+            # Normalize to [0, 1], keeping NODATA as 0
+            valid_mask = band_data != 0
+            normalized_band = np.zeros_like(band_data, dtype=np.float32)
+            normalized_band[valid_mask] = (band_data[valid_mask] - band_range["min"]) / (band_range["max"] - band_range["min"])
+            normalized_band = np.clip(normalized_band, 0, 1)
+            
+            normalized_scene[:, :, i] = normalized_band
+        
+        return normalized_scene
+
     def _setup_debug_monthly_splits(self):
         """
         Setup debug monthly splits within a single year:
@@ -354,8 +384,8 @@ class LandsatSequenceDataset(Dataset):
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Returns:
-            input_sequence: (T_in, H, W, C) = (input_sequence_length, 128, 128, 9)
-            target_sequence: (T_out, H, W, 1) = (output_sequence_length, 128, 128, 1) - LST only
+            input_sequence: (T_in, H, W, C) = (input_sequence_length, 128, 128, 9) - normalized [0,1]
+            target_sequence: (T_out, H, W, 1) = (output_sequence_length, 128, 128, 1) - normalized LST [0,1]
         """
         city, tile_row, tile_col, input_months, output_months = self.tile_sequences[idx]
         
@@ -363,13 +393,15 @@ class LandsatSequenceDataset(Dataset):
         input_scenes = []
         for month in input_months:
             scene = self._load_scene_tile(city, month, tile_row, tile_col)
-            input_scenes.append(scene)
+            normalized_scene = self._normalize_scene(scene)  # Add normalization
+            input_scenes.append(normalized_scene)
         
         # Load output sequence (LST only)
         output_scenes = []
         for month in output_months:
             scene = self._load_scene_tile(city, month, tile_row, tile_col)
-            lst_only = scene[:, :, 1:2]  # LST is index 1, keep dims
+            normalized_scene = self._normalize_scene(scene)  # Add normalization
+            lst_only = normalized_scene[:, :, 1:2]  # LST is index 1, keep dims
             output_scenes.append(lst_only)
         
         # Convert to tensors
