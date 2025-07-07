@@ -67,7 +67,7 @@ class LandsatLSTPredictor(pl.LightningModule):
         self.model = CuboidTransformerModel(**self.model_config)
         
         # Loss function
-        self.criterion = nn.MSELoss()
+        self.criterion = nn.MSELoss(reduction='none') 
         
         # Band names for visualization
         self.band_names = ['DEM (+10k offset)', 'LST (°F)', 'Red (×10k)', 'Green (×10k)', 'Blue (×10k)', 
@@ -78,6 +78,35 @@ class LandsatLSTPredictor(pl.LightningModule):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through the model"""
         return self.model(x)
+    
+    def masked_loss(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Calculate MSE loss with NODATA masking (value 0)"""
+        # Create mask where targets are not NODATA (not 0)
+        valid_mask = (targets != 0).float()
+        
+        # Calculate element-wise loss
+        loss_elements = self.criterion(predictions, targets)
+        
+        # Apply mask and calculate mean only over valid pixels
+        masked_loss = loss_elements * valid_mask
+        valid_count = valid_mask.sum()
+        
+        if valid_count > 0:
+            return masked_loss.sum() / valid_count
+        else:
+            return torch.tensor(0.0, device=predictions.device, requires_grad=True)
+        
+    def masked_mae(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Calculate MAE with NODATA masking"""
+        valid_mask = (targets != 0).float()
+        mae_elements = torch.abs(predictions - targets)
+        masked_mae = mae_elements * valid_mask
+        valid_count = valid_mask.sum()
+        
+        if valid_count > 0:
+            return masked_mae.sum() / valid_count
+        else:
+            return torch.tensor(0.0, device=predictions.device)
 
     def create_landsat_visualization(self, inputs: torch.Tensor, targets: torch.Tensor, 
                             predictions: Optional[torch.Tensor] = None, 
@@ -826,10 +855,10 @@ class LandsatLSTPredictor(pl.LightningModule):
             print(f"Input LST range: {inputs[:,:,:,:,1].min().item():.1f} to {inputs[:,:,:,:,1].max().item():.1f}")
         
         # Calculate loss
-        loss = self.criterion(predictions, targets)
+        loss = self.masked_loss(predictions, targets)
         
         # Calculate metrics
-        mae = torch.nn.functional.l1_loss(predictions, targets)
+        mae = self.masked_mae(predictions, targets)
         
         # Log metrics
         self.log('train_loss', torch.sqrt(loss), on_step=True, on_epoch=True, prog_bar=True)
@@ -861,10 +890,10 @@ class LandsatLSTPredictor(pl.LightningModule):
         predictions = self.forward(inputs)
         
         # Calculate loss
-        loss = self.criterion(predictions, targets)
+        loss = self.masked_loss(predictions, targets)
         
         # Calculate metrics
-        mae = torch.nn.functional.l1_loss(predictions, targets)
+        mae = self.masked_mae(predictions, targets)
         
         # Log metrics
         self.log('val_loss', torch.sqrt(loss), on_step=False, on_epoch=True, prog_bar=True)
@@ -907,10 +936,10 @@ class LandsatLSTPredictor(pl.LightningModule):
         """Test step"""
         inputs, targets = batch
         predictions = self.forward(inputs)
-        loss = self.criterion(predictions, targets)
+        loss = self.masked_loss(predictions, targets)
         
         # Calculate comprehensive test metrics
-        mae = torch.nn.functional.l1_loss(predictions, targets)
+        mae = self.masked_mae(predictions, targets)
         rmse = torch.sqrt(torch.nn.functional.mse_loss(predictions, targets))
         
         self.log('test_loss', torch.sqrt(loss), on_step=False, on_epoch=True)
