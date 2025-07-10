@@ -1,3 +1,5 @@
+# Enhanced dataset.py with interpolated scene filtering
+
 import os
 import torch
 import rasterio
@@ -5,7 +7,7 @@ import numpy as np
 from torch.utils.data import Dataset, DataLoader
 import pytorch_lightning as pl
 from datetime import datetime
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict, Optional, Set
 from pathlib import Path
 import glob
 from collections import defaultdict
@@ -25,55 +27,91 @@ BAND_RANGES = {
     "albedo": {"min": 1.0, "max": 9980.0}
 }
 
+def load_interpolated_scenes(interpolated_file: str = "interpolated.txt") -> Set[str]:
+    """
+    Load list of interpolated scenes that should not be used as ground truth
+    
+    Args:
+        interpolated_file: Path to file containing interpolated scene identifiers
+        
+    Returns:
+        Set of scene identifiers in format "City_State/YYYY-MM-DDTHH:MM:SSZ"
+    """
+    interpolated_scenes = set()
+    
+    if os.path.exists(interpolated_file):
+        with open(interpolated_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):  # Skip empty lines and comments
+                    interpolated_scenes.add(line)
+        
+        print(f"Loaded {len(interpolated_scenes)} interpolated scenes to exclude from ground truth")
+        
+        # Print some examples for verification
+        if interpolated_scenes:
+            print("Examples of interpolated scenes:")
+            for i, scene in enumerate(sorted(list(interpolated_scenes))[:5]):
+                print(f"  {scene}")
+            if len(interpolated_scenes) > 5:
+                print(f"  ... and {len(interpolated_scenes) - 5} more")
+    else:
+        print(f"Warning: Interpolated scenes file '{interpolated_file}' not found. All scenes will be used as ground truth.")
+    
+    return interpolated_scenes
+
 class LandsatSequenceDataset(Dataset):
     def __init__(
         self, 
         dataset_root: str,
-        input_sequence_length: int = 3,     # Changed from sequence_length
-        output_sequence_length: int = 3,    # New parameter
+        input_sequence_length: int = 3,
+        output_sequence_length: int = 3,
         split: str = 'train',
         train_years: Optional[List[int]] = None,
         val_years: Optional[List[int]] = None,
         test_years: Optional[List[int]] = None,
-        # New debug option
         debug_monthly_split: bool = False,
-        debug_year: int = 2014
+        debug_year: int = 2014,
+        interpolated_scenes_file: str = "interpolated.txt"  # New parameter
     ):
         """
         Dataset for Landsat sequence prediction using tiled data with year-based splits
         
         Args:
             dataset_root: Path to Dataset folder containing Cities_Tiles and DEM_2014_Tiles
-            sequence_length: Number of consecutive months (input=3, output=3)
+            input_sequence_length: Number of consecutive months for input
+            output_sequence_length: Number of consecutive months for output
             split: 'train', 'val', or 'test'
             train_years/val_years/test_years: Year lists for each split
             debug_monthly_split: If True, use monthly splits within debug_year
             debug_year: Year to use for debug monthly splits (default: 2014)
+            interpolated_scenes_file: Path to file containing interpolated scenes to exclude from ground truth
         """
         self.dataset_root = Path(dataset_root)
-        self.input_sequence_length = input_sequence_length      # Updated
-        self.output_sequence_length = output_sequence_length    # New
-        self.total_sequence_length = input_sequence_length + output_sequence_length  # New
+        self.input_sequence_length = input_sequence_length
+        self.output_sequence_length = output_sequence_length
+        self.total_sequence_length = input_sequence_length + output_sequence_length
         self.split = split
         self.debug_monthly_split = debug_monthly_split
         self.debug_year = debug_year
         self._scene_validation_cache = {}
         
+        # Load interpolated scenes to exclude from ground truth
+        self.interpolated_scenes = load_interpolated_scenes(interpolated_scenes_file)
+        
         if debug_monthly_split:
-            # Debug mode: Use monthly splits within a single year
             self._setup_debug_monthly_splits()
         else:
-            # Normal mode: Use year-based splits
             self._setup_year_based_splits(train_years, val_years, test_years)
         
-        # Get all available cities (we still process all cities, just filter by years/months)
         self.cities = self._get_all_cities()
-        
-        # Band names (for tiled files)
         self.band_names = ['DEM', 'LST', 'red', 'green', 'blue', 'ndvi', 'ndwi', 'ndbi', 'albedo']
         
-        # Build tile sequences filtered by years/months
+        # Build tile sequences with interpolated scene filtering
         self.tile_sequences = self._build_tile_sequences()
+        
+        # Print filtering statistics
+        self._print_filtering_stats()
         
         if debug_monthly_split:
             print(f"DEBUG {split} split: {len(self.cities)} cities, year {debug_year}, "
@@ -81,6 +119,53 @@ class LandsatSequenceDataset(Dataset):
         else:
             print(f"{split} split: {len(self.cities)} cities, {len(self.years)} years "
                   f"({min(self.years)}-{max(self.years)}), {len(self.tile_sequences)} tile sequences")
+    
+    def _print_filtering_stats(self):
+        """Print statistics about interpolated scene filtering"""
+        if not self.interpolated_scenes:
+            return
+            
+        total_sequences_checked = 0
+        sequences_with_interpolated_output = 0
+        sequences_kept = len(self.tile_sequences)
+        
+        # We can't easily count filtered sequences without rebuilding, but we can show what was loaded
+        print(f"\n=== INTERPOLATED SCENE FILTERING STATS ===")
+        print(f"Interpolated scenes loaded: {len(self.interpolated_scenes)}")
+        print(f"Valid sequences after filtering: {sequences_kept}")
+        
+        # Check if any interpolated scenes affect current split years
+        affected_years = set()
+        for scene_id in self.interpolated_scenes:
+            try:
+                # Extract year from scene_id format: "City_State/YYYY-MM-DDTHH:MM:SSZ"
+                date_part = scene_id.split('/')[1]
+                year = int(date_part.split('-')[0])
+                if year in self.years:
+                    affected_years.add(year)
+            except:
+                continue
+        
+        if affected_years:
+            print(f"Interpolated scenes affect years in this split: {sorted(affected_years)}")
+        else:
+            print(f"No interpolated scenes affect years in this split: {sorted(self.years)}")
+        print(f"{'='*50}")
+    
+    def _is_scene_interpolated(self, city: str, scene_date: str) -> bool:
+        """
+        Check if a scene is in the interpolated scenes list
+        
+        Args:
+            city: City name (e.g., "Austin_TX")
+            scene_date: Scene date string (e.g., "2013-12-15T12:00:00Z")
+            
+        Returns:
+            True if scene is interpolated and should not be used as ground truth
+        """
+        # Create scene identifier in the format from interpolated.txt
+        scene_id = f"{city}/{scene_date}"
+        return scene_id in self.interpolated_scenes
     
     def _normalize_scene(self, scene_data: np.ndarray) -> np.ndarray:
         """Normalize scene data to [0, 1] range using predefined ranges"""
@@ -101,7 +186,7 @@ class LandsatSequenceDataset(Dataset):
         return normalized_scene
     
     def _process_single_city(self, city: str) -> List[Tuple[str, int, int, List[str], List[str]]]:
-        """Process a single city and return its sequences"""
+        """Process a single city and return its sequences, filtering out those with interpolated ground truth"""
         city_sequences = []
         
         available_tiles = self._get_available_tiles(city)
@@ -119,24 +204,31 @@ class LandsatSequenceDataset(Dataset):
                 
                 if self._are_consecutive_months(input_months + output_months):
                     if self._verify_tile_sequence_exists(city, tile_row, tile_col, input_months + output_months):
-                        city_sequences.append((city, tile_row, tile_col, input_months, output_months))
+                        
+                        # NEW: Check if any output scenes are interpolated
+                        has_interpolated_output = False
+                        for month in output_months:
+                            scene_path = monthly_scenes[month]
+                            scene_dir = Path(scene_path)
+                            scene_date = scene_dir.name  # e.g., "2013-12-15T12:00:00Z"
+                            
+                            if self._is_scene_interpolated(city, scene_date):
+                                has_interpolated_output = True
+                                break
+                        
+                        # Only include sequence if NO output scenes are interpolated
+                        if not has_interpolated_output:
+                            city_sequences.append((city, tile_row, tile_col, input_months, output_months))
+                        # Note: Input scenes can be interpolated - we only exclude from ground truth
         
         return city_sequences
 
     def _setup_debug_monthly_splits(self):
-        """
-        Setup debug monthly splits within a single year:
-        Train: months [1,2,3,4,5,6,7,8] (Jan-Aug)
-        Val: months [6,7,8,9,10] (Jun-Oct) 
-        Test: months [8,9,10,11,12] (Aug-Dec)
-        
-        Note: Overlapping months are needed for sequence continuity
-        """
+        """Setup debug monthly splits within a single year"""
         train_months = [1, 2, 3, 4, 5, 6, 7, 8]
         val_months = [6, 7, 8, 9, 10]
         test_months = [8, 9, 10, 11, 12]
         
-        # Set allowed months for current split
         if self.split == 'train':
             self.allowed_months = set(train_months)
         elif self.split == 'val':
@@ -144,10 +236,8 @@ class LandsatSequenceDataset(Dataset):
         else:  # test
             self.allowed_months = set(test_months)
         
-        # Only use the debug year
         self.years = {self.debug_year}
         
-        # Store all split info for reference
         self.train_months = set(train_months)
         self.val_months = set(val_months)
         self.test_months = set(test_months)
@@ -160,14 +250,10 @@ class LandsatSequenceDataset(Dataset):
     
     def _setup_year_based_splits(self, train_years, val_years, test_years):
         """Setup normal year-based splits"""
-        # Define year splits based on temporal coverage (May 2013 - May 2025)
         if train_years is None or val_years is None or test_years is None:
-            # Create chronological year splits: 70/15/15 temporal split
-            # Available years: 2013-2025 (13 years total)
             all_years = list(range(2013, 2026))  # 2013 to 2025 inclusive
             n_years = len(all_years)
             
-            # Calculate split points
             train_end = int(0.7 * n_years)  # 70% = ~9 years
             val_end = int(0.85 * n_years)   # 15% = ~2 years
             
@@ -179,7 +265,6 @@ class LandsatSequenceDataset(Dataset):
             self.val_years = set(val_years)
             self.test_years = set(test_years)
         
-        # Get years for current split
         if self.split == 'train':
             self.years = self.train_years
         elif self.split == 'val':
@@ -187,7 +272,6 @@ class LandsatSequenceDataset(Dataset):
         else:
             self.years = self.test_years
         
-        # No month filtering in normal mode
         self.allowed_months = None
 
     def _get_all_cities(self) -> List[str]:
@@ -197,17 +281,12 @@ class LandsatSequenceDataset(Dataset):
         return sorted(cities)
     
     def _get_available_tiles(self, city: str) -> Dict[Tuple[int, int], bool]:
-        """
-        Get all available tile positions for a city
-        Returns: {(row, col): True} for available tiles
-        """
-        # Check DEM tiles first to get available tile positions
+        """Get all available tile positions for a city"""
         dem_dir = self.dataset_root / "DEM_2014_Tiles" / city
         available_tiles = {}
         
         if dem_dir.exists():
             for dem_file in dem_dir.glob("DEM_row_*_col_*.tif"):
-                # Parse row and col from filename: DEM_row_000_col_001.tif
                 parts = dem_file.stem.split('_')
                 if len(parts) >= 4:
                     try:
@@ -220,22 +299,16 @@ class LandsatSequenceDataset(Dataset):
         return available_tiles
     
     def _get_monthly_scenes(self, city: str) -> Dict[str, str]:
-        """
-        Get one scene per month for a city from tiled data, filtered by years and months
-        Returns: {YYYY-MM: scene_path}
-        """
+        """Get one scene per month for a city from tiled data, filtered by years and months"""
         city_dir = self.dataset_root / "Cities_Tiles" / city
         if not city_dir.exists():
             return {}
         
         monthly_scenes = {}
-        
-        # Get all scene directories
         scene_dirs = [d for d in city_dir.iterdir() if d.is_dir()]
         
         for scene_dir in scene_dirs:
             try:
-                # Parse datetime from folder name
                 date_str = scene_dir.name  # e.g., "2016-12-26T18:10:25Z"
                 date_obj = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
                 
@@ -252,7 +325,6 @@ class LandsatSequenceDataset(Dataset):
                 
                 # Only keep first scene per month
                 if month_key not in monthly_scenes:
-                    # Verify scene has tiles
                     if self._validate_tiled_scene(scene_dir):
                         monthly_scenes[month_key] = str(scene_dir)
                         
@@ -264,21 +336,18 @@ class LandsatSequenceDataset(Dataset):
     
     def _validate_tiled_scene(self, scene_dir: Path) -> bool:
         """Check if scene has tile files"""
-        # Check if there are any .tif files in the scene directory
         tif_files = list(scene_dir.glob("*.tif"))
         return len(tif_files) > 0
     
     def _build_tile_sequences(self) -> List[Tuple[str, int, int, List[str], List[str]]]:
-        """
-        Build consecutive monthly sequences for each tile position, filtered by years/months
-        Returns: List of (city, tile_row, tile_col, input_months, output_months)
-        """
+        """Build consecutive monthly sequences for each tile position, filtering interpolated ground truth"""
         if self.debug_monthly_split:
             month_stats = {month: 0 for month in self.allowed_months}
         else:
             year_stats = {year: 0 for year in self.years}
         
         print(f"\n🔄 Building tile sequences for {self.split} split using {cpu_count()} cores...")
+        print(f"   Excluding {len(self.interpolated_scenes)} interpolated scenes from ground truth...")
         
         # Process cities in parallel
         with Pool(processes=min(cpu_count(), len(self.cities))) as pool:
@@ -319,11 +388,9 @@ class LandsatSequenceDataset(Dataset):
     
     def _verify_tile_sequence_exists(self, city: str, tile_row: int, tile_col: int, months: List[str]) -> bool:
         """Verify using cached scene validation"""
-        # Create cache key
         cache_key = (city, tile_row, tile_col)
         
         if cache_key not in self._scene_validation_cache:
-            # Pre-validate all months for this city/tile combination
             monthly_scenes = self._get_monthly_scenes(city)
             valid_months = set()
             
@@ -335,7 +402,6 @@ class LandsatSequenceDataset(Dataset):
             
             self._scene_validation_cache[cache_key] = valid_months
         
-        # Check if all required months are in the valid set
         valid_months = self._scene_validation_cache[cache_key]
         return all(month in valid_months for month in months)
     
@@ -352,7 +418,6 @@ class LandsatSequenceDataset(Dataset):
             prev_year, prev_month = dates[i-1]
             curr_year, curr_month = dates[i]
             
-            # Calculate expected next month
             if prev_month == 12:
                 expected_year, expected_month = prev_year + 1, 1
             else:
@@ -368,7 +433,6 @@ class LandsatSequenceDataset(Dataset):
         try:
             with rasterio.open(file_path) as src:
                 data = src.read(1).astype(np.float32)
-                # Replace nodata with 0
                 if src.nodata is not None:
                     data[data == src.nodata] = 0
                 return data
@@ -382,10 +446,7 @@ class LandsatSequenceDataset(Dataset):
         return self._load_raster(str(dem_path))
     
     def _load_scene_tile(self, city: str, month: str, tile_row: int, tile_col: int) -> np.ndarray:
-        """
-        Load all bands for a scene tile
-        Returns: (H, W, 9) array with bands in order: DEM, LST, red, green, blue, ndvi, ndwi, ndbi, albedo
-        """
+        """Load all bands for a scene tile"""
         monthly_scenes = self._get_monthly_scenes(city)
         scene_dir = Path(monthly_scenes[month])
         
@@ -415,18 +476,18 @@ class LandsatSequenceDataset(Dataset):
         """
         city, tile_row, tile_col, input_months, output_months = self.tile_sequences[idx]
         
-        # Load input sequence
+        # Load input sequence (can include interpolated scenes)
         input_scenes = []
         for month in input_months:
             scene = self._load_scene_tile(city, month, tile_row, tile_col)
-            normalized_scene = self._normalize_scene(scene)  # Add normalization
+            normalized_scene = self._normalize_scene(scene)
             input_scenes.append(normalized_scene)
         
-        # Load output sequence (LST only)
+        # Load output sequence (guaranteed to be non-interpolated due to filtering)
         output_scenes = []
         for month in output_months:
             scene = self._load_scene_tile(city, month, tile_row, tile_col)
-            normalized_scene = self._normalize_scene(scene)  # Add normalization
+            normalized_scene = self._normalize_scene(scene)
             lst_only = normalized_scene[:, :, 1:2]  # LST is index 1, keep dims
             output_scenes.append(lst_only)
         
@@ -444,68 +505,71 @@ class LandsatDataModule(pl.LightningDataModule):
         dataset_root: str,
         batch_size: int = 4,
         num_workers: int = 4,
-        input_sequence_length: int = 3,     # Changed from sequence_length
+        input_sequence_length: int = 3,
         output_sequence_length: int = 3,  
         train_years: Optional[List[int]] = None,
         val_years: Optional[List[int]] = None,
         test_years: Optional[List[int]] = None,
-        # New debug option
         debug_monthly_split: bool = False,
-        debug_year: int = 2014
+        debug_year: int = 2014,
+        interpolated_scenes_file: str = "interpolated.txt"  # New parameter
     ):
         super().__init__()
         self.dataset_root = dataset_root
         self.batch_size = batch_size
         self.num_workers = num_workers
-        self.input_sequence_length = input_sequence_length      # Updated
+        self.input_sequence_length = input_sequence_length
         self.output_sequence_length = output_sequence_length
         self.train_years = train_years
         self.val_years = val_years
         self.test_years = test_years
         self.debug_monthly_split = debug_monthly_split
         self.debug_year = debug_year
+        self.interpolated_scenes_file = interpolated_scenes_file
         
     def setup(self, stage: Optional[str] = None):
-        """Setup datasets for each stage with year-based or debug monthly splits"""
+        """Setup datasets for each stage with interpolated scene filtering"""
         if stage == "fit" or stage is None:
             self.train_dataset = LandsatSequenceDataset(
                 self.dataset_root,
-                input_sequence_length=self.input_sequence_length,   # Updated
-                output_sequence_length=self.output_sequence_length, # New
+                input_sequence_length=self.input_sequence_length,
+                output_sequence_length=self.output_sequence_length,
                 split='train',
                 train_years=self.train_years,
                 val_years=self.val_years,
                 test_years=self.test_years,
                 debug_monthly_split=self.debug_monthly_split,
-                debug_year=self.debug_year
+                debug_year=self.debug_year,
+                interpolated_scenes_file=self.interpolated_scenes_file
             )
             
             self.val_dataset = LandsatSequenceDataset(
                 self.dataset_root,
-                input_sequence_length=self.input_sequence_length,   # Updated
-                output_sequence_length=self.output_sequence_length, # New
+                input_sequence_length=self.input_sequence_length,
+                output_sequence_length=self.output_sequence_length,
                 split='val',
                 train_years=self.train_years,
                 val_years=self.val_years,
                 test_years=self.test_years,
                 debug_monthly_split=self.debug_monthly_split,
-                debug_year=self.debug_year
+                debug_year=self.debug_year,
+                interpolated_scenes_file=self.interpolated_scenes_file
             )
         
         if stage == "test" or stage is None:
             self.test_dataset = LandsatSequenceDataset(
                 self.dataset_root,
-                input_sequence_length=self.input_sequence_length,   # Updated
-                output_sequence_length=self.output_sequence_length, # New
+                input_sequence_length=self.input_sequence_length,
+                output_sequence_length=self.output_sequence_length,
                 split='test',
                 train_years=self.train_years,
                 val_years=self.val_years,
                 test_years=self.test_years,
                 debug_monthly_split=self.debug_monthly_split,
-                debug_year=self.debug_year
+                debug_year=self.debug_year,
+                interpolated_scenes_file=self.interpolated_scenes_file
             )
 
-    
     def train_dataloader(self):
         return DataLoader(
             self.train_dataset,
@@ -537,75 +601,54 @@ class LandsatDataModule(pl.LightningDataModule):
         )
 
 
-# Debug usage examples
-def create_debug_monthly_split_example():
-    """Example of how to use debug monthly splits"""
+# Usage example with interpolated scene filtering
+def test_interpolated_filtering():
+    """Test the interpolated scene filtering functionality"""
     
-    print("Creating debug monthly split data module...")
+    print("=== TESTING INTERPOLATED SCENE FILTERING ===\n")
     
-    # Debug monthly split within 2014
-    debug_data_module = LandsatDataModule(
-        dataset_root="./Data/Dataset",
+    # Create data module with interpolated scene filtering
+    data_module = LandsatDataModule(
+        dataset_root="./Data/ML",
         batch_size=2,
-        sequence_length=3,
+        input_sequence_length=3,
+        output_sequence_length=1,
         debug_monthly_split=True,
-        debug_year=2014
+        debug_year=2014,
+        interpolated_scenes_file="./Data/ML/interpolated.txt"
     )
     
-    # Test the setup
-    debug_data_module.setup("fit")
+    # Setup and analyze the results
+    data_module.setup("fit")
     
-    print(f"Debug train sequences: {len(debug_data_module.train_dataset.tile_sequences)}")
-    print(f"Debug val sequences: {len(debug_data_module.val_dataset.tile_sequences)}")
+    print(f"Train sequences: {len(data_module.train_dataset.tile_sequences)}")
+    print(f"Val sequences: {len(data_module.val_dataset.tile_sequences)}")
     
-    # Check a sample
-    train_loader = debug_data_module.train_dataloader()
-    if len(train_loader) > 0:
-        sample_batch = next(iter(train_loader))
-        inputs, targets = sample_batch
-        print(f"Sample batch - Inputs: {inputs.shape}, Targets: {targets.shape}")
-        
-        # Show which months are being used in the sample
-        sample_seq = debug_data_module.train_dataset.tile_sequences[0]
+    # Check specific sequences for interpolated scenes
+    if len(data_module.train_dataset.tile_sequences) > 0:
+        sample_seq = data_module.train_dataset.tile_sequences[0]
         city, tile_row, tile_col, input_months, output_months = sample_seq
-        print(f"Sample sequence: {city} tile({tile_row},{tile_col})")
+        
+        print(f"\nSample sequence: {city} tile({tile_row},{tile_col})")
         print(f"  Input months: {input_months}")
         print(f"  Output months: {output_months}")
+        
+        # Verify no output months are interpolated
+        interpolated_scenes = data_module.train_dataset.interpolated_scenes
+        monthly_scenes = data_module.train_dataset._get_monthly_scenes(city)
+        
+        for month in output_months:
+            if month in monthly_scenes:
+                scene_path = monthly_scenes[month]
+                scene_dir = Path(scene_path)
+                scene_date = scene_dir.name
+                scene_id = f"{city}/{scene_date}"
+                
+                is_interpolated = scene_id in interpolated_scenes
+                print(f"    {month} ({scene_date}): {'INTERPOLATED' if is_interpolated else 'ORIGINAL'}")
     
-    return debug_data_module
+    return data_module
 
-
-def compare_normal_vs_debug_splits():
-    """Compare normal year-based splits vs debug monthly splits"""
-    
-    print("=== COMPARISON: Normal vs Debug Splits ===\n")
-    
-    # Normal year-based split
-    print("1. Normal year-based split:")
-    normal_dm = LandsatDataModule(
-        dataset_root="./Data/Dataset",
-        batch_size=2,
-        sequence_length=3,
-        train_years=[2014],  # Use only 2014 for fair comparison
-        val_years=[2015],
-        test_years=[2016]
-    )
-    normal_dm.setup("fit")
-    print(f"   Train sequences: {len(normal_dm.train_dataset.tile_sequences)}")
-    print(f"   Val sequences: {len(normal_dm.val_dataset.tile_sequences)}")
-    
-    # Debug monthly split
-    print("\n2. Debug monthly split (2014 only):")
-    debug_dm = LandsatDataModule(
-        dataset_root="./Data/Dataset",
-        batch_size=2,
-        sequence_length=3,
-        debug_monthly_split=True,
-        debug_year=2014
-    )
-    debug_dm.setup("fit")
-    print(f"   Train sequences: {len(debug_dm.train_dataset.tile_sequences)}")
-    print(f"   Val sequences: {len(debug_dm.val_dataset.tile_sequences)}")
-    
-    print("\nDebug splits allow for rapid prototyping with smaller datasets!")
-    return normal_dm, debug_dm
+if __name__ == "__main__":
+    # Test the filtering
+    test_data_module = test_interpolated_filtering()
