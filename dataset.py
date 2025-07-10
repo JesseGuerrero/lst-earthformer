@@ -9,6 +9,9 @@ from typing import List, Tuple, Dict, Optional
 from pathlib import Path
 import glob
 from collections import defaultdict
+from tqdm import tqdm
+from multiprocessing import Pool, cpu_count
+from functools import partial
 
 BAND_RANGES = {
     "DEM": {"min": 9899.0, "max": 13110.0},
@@ -54,6 +57,7 @@ class LandsatSequenceDataset(Dataset):
         self.split = split
         self.debug_monthly_split = debug_monthly_split
         self.debug_year = debug_year
+        self._scene_validation_cache = {}
         
         if debug_monthly_split:
             # Debug mode: Use monthly splits within a single year
@@ -95,6 +99,29 @@ class LandsatSequenceDataset(Dataset):
             normalized_scene[:, :, i] = normalized_band
         
         return normalized_scene
+    
+    def _process_single_city(self, city: str) -> List[Tuple[str, int, int, List[str], List[str]]]:
+        """Process a single city and return its sequences"""
+        city_sequences = []
+        
+        available_tiles = self._get_available_tiles(city)
+        monthly_scenes = self._get_monthly_scenes(city)
+        
+        if len(monthly_scenes) < self.total_sequence_length:
+            return city_sequences
+        
+        sorted_months = sorted(monthly_scenes.keys())
+        
+        for (tile_row, tile_col) in available_tiles.keys():
+            for i in range(len(sorted_months) - self.total_sequence_length + 1):
+                input_months = sorted_months[i:i + self.input_sequence_length]
+                output_months = sorted_months[i + self.input_sequence_length:i + self.total_sequence_length]
+                
+                if self._are_consecutive_months(input_months + output_months):
+                    if self._verify_tile_sequence_exists(city, tile_row, tile_col, input_months + output_months):
+                        city_sequences.append((city, tile_row, tile_col, input_months, output_months))
+        
+        return city_sequences
 
     def _setup_debug_monthly_splits(self):
         """
@@ -246,48 +273,42 @@ class LandsatSequenceDataset(Dataset):
         Build consecutive monthly sequences for each tile position, filtered by years/months
         Returns: List of (city, tile_row, tile_col, input_months, output_months)
         """
-        sequences = []
-        
         if self.debug_monthly_split:
             month_stats = {month: 0 for month in self.allowed_months}
         else:
             year_stats = {year: 0 for year in self.years}
         
-        for city in self.cities:
-            available_tiles = self._get_available_tiles(city)
-            monthly_scenes = self._get_monthly_scenes(city)
-            
-            if len(monthly_scenes) < self.total_sequence_length:  # Updated
-                continue
-            
-            sorted_months = sorted(monthly_scenes.keys())
-            
-            for (tile_row, tile_col) in available_tiles.keys():
-                # Updated loop range to use configurable lengths
-                for i in range(len(sorted_months) - self.total_sequence_length + 1):
-                    input_months = sorted_months[i:i + self.input_sequence_length]
-                    output_months = sorted_months[i + self.input_sequence_length:i + self.total_sequence_length]
-                    
-                    if self._are_consecutive_months(input_months + output_months):
-                        if self._verify_tile_sequence_exists(city, tile_row, tile_col, input_months + output_months):
-                            sequences.append((city, tile_row, tile_col, input_months, output_months))
-                            
-                            # Track statistics (same logic as before)
-                            if self.debug_monthly_split:
-                                first_month = int(input_months[0].split('-')[1])
-                                if first_month in month_stats:
-                                    month_stats[first_month] += 1
-                            else:
-                                first_year = int(input_months[0].split('-')[0])
-                                if first_year in year_stats:
-                                    year_stats[first_year] += 1
+        print(f"\n🔄 Building tile sequences for {self.split} split using {cpu_count()} cores...")
+        
+        # Process cities in parallel
+        with Pool(processes=min(cpu_count(), len(self.cities))) as pool:
+            city_results = list(tqdm(
+                pool.imap(self._process_single_city, self.cities),
+                total=len(self.cities),
+                desc=f"Processing cities ({self.split})",
+                unit="city"
+            ))
+        
+        # Flatten results
+        sequences = [seq for city_seqs in city_results for seq in city_seqs]
+        
+        # Calculate statistics
+        for city, tile_row, tile_col, input_months, output_months in sequences:
+            if self.debug_monthly_split:
+                first_month = int(input_months[0].split('-')[1])
+                if first_month in month_stats:
+                    month_stats[first_month] += 1
+            else:
+                first_year = int(input_months[0].split('-')[0])
+                if first_year in year_stats:
+                    year_stats[first_year] += 1
         
         # Print statistics
         if self.debug_monthly_split:
             print(f"Sequences by month for {self.split} split (year {self.debug_year}):")
             for month in sorted(month_stats.keys()):
                 month_name = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                             'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][month-1]
+                                'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][month-1]
                 print(f"  {month:02d} ({month_name}): {month_stats[month]} sequences")
         else:
             print(f"Sequences by year for {self.split} split:")
@@ -297,21 +318,26 @@ class LandsatSequenceDataset(Dataset):
         return sequences
     
     def _verify_tile_sequence_exists(self, city: str, tile_row: int, tile_col: int, months: List[str]) -> bool:
-        """Verify that all required tiles exist for a sequence"""
-        monthly_scenes = self._get_monthly_scenes(city)
+        """Verify using cached scene validation"""
+        # Create cache key
+        cache_key = (city, tile_row, tile_col)
         
-        for month in months:
-            if month not in monthly_scenes:
-                return False
+        if cache_key not in self._scene_validation_cache:
+            # Pre-validate all months for this city/tile combination
+            monthly_scenes = self._get_monthly_scenes(city)
+            valid_months = set()
             
-            scene_dir = Path(monthly_scenes[month])
+            for month, scene_path in monthly_scenes.items():
+                scene_dir = Path(scene_path)
+                lst_tile = scene_dir / f"LST_row_{tile_row:03d}_col_{tile_col:03d}.tif"
+                if lst_tile.exists():
+                    valid_months.add(month)
             
-            # Check if LST tile exists (minimum requirement)
-            lst_tile = scene_dir / f"LST_row_{tile_row:03d}_col_{tile_col:03d}.tif"
-            if not lst_tile.exists():
-                return False
+            self._scene_validation_cache[cache_key] = valid_months
         
-        return True
+        # Check if all required months are in the valid set
+        valid_months = self._scene_validation_cache[cache_key]
+        return all(month in valid_months for month in months)
     
     def _are_consecutive_months(self, months: List[str]) -> bool:
         """Check if months are consecutive"""
