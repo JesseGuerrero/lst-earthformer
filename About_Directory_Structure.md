@@ -103,3 +103,6 @@ All bands are normalized to [0,1] using predefined ranges:
 
 ### Dataset Size
 124 Cities, minimum 90 square miles each city, 30m spatial resolution, monthly temporal resolution, Landsat data. Each tif is 128x128 pixels from the city satellite scenes at int16.
+
+### Prompt preferences
+Whenever responding to me do not repeat back to me the entire script. For whatever functionality I am asking you to add, make as minimal code changes as possible while adding the functionality. Keep it as simple as possible while keeping the functionality I am asking. Also give me whole functions to paste over, not whole files/script.
