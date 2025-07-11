@@ -447,46 +447,6 @@ class LandsatSequenceDataset(Dataset):
         
         return normalized_scene
 
-    def _preload_to_ram(self):
-        """Preload all tile sequences to RAM using multiprocessing with FP16 storage (always)"""
-        num_cpu = min(cpu_count(), len(self.tile_sequences))
-        print(f"🔄 Preloading {len(self.tile_sequences)} tile sequences to RAM with {num_cpu} cores (FP16)...")
-        
-        # Process in parallel
-        with Pool(processes=num_cpu) as pool:
-            load_func = partial(self._load_sequence_static, 
-                            dataset_root=str(self.dataset_root),
-                            band_names=self.band_names,
-                            input_length=self.input_sequence_length,
-                            output_length=self.output_sequence_length,
-                            nodata_value=self.nodata_fill_value)
-            
-            results = list(tqdm(
-                pool.imap(load_func, self.tile_sequences, chunksize=10),
-                total=len(self.tile_sequences),
-                desc=f"Loading {self.split} data to RAM (INT16→FP16)"
-            ))
-        
-        # Keep valid indices and filter both sequences and results together
-        valid_sequences = []
-        valid_cached_data = []
-        
-        for i, result in enumerate(results):
-            if result is not None:
-                input_data, target_data = result
-                # Always cache in FP16 for memory savings
-                input_tensor = torch.from_numpy(np.stack(input_data, axis=0)).to(torch.float16)
-                target_tensor = torch.from_numpy(np.stack(target_data, axis=0)).to(torch.float16)
-                
-                valid_sequences.append(self.tile_sequences[i])
-                valid_cached_data.append((input_tensor, target_tensor))
-        
-        # Update both tile_sequences and cached_data to maintain consistency
-        self.tile_sequences = valid_sequences
-        self.cached_data = valid_cached_data
-        
-        print(f"✅ Cached {len(self.cached_data)} sequences in RAM as FP16 ({len(results) - len(self.cached_data)} failed)")
-
     @staticmethod
     def _load_sequence_static(sequence_info, dataset_root, band_names, input_length, output_length, nodata_value):
         """Static method for parallel loading using native int16"""
@@ -580,24 +540,6 @@ class LandsatSequenceDataset(Dataset):
         except Exception:
             return None
 
-    @staticmethod
-    def _normalize_scene_static(scene_data, band_names, nodata_value):
-        """Static normalization method - convert int16 to normalized float32"""
-        # Convert from int16 to normalized float32
-        normalized_scene = np.zeros(scene_data.shape, dtype=np.float32)
-        
-        for i, band_name in enumerate(band_names):
-            band_data = scene_data[:, :, i].astype(np.float32)  # Convert to float for normalization
-            band_range = BAND_RANGES[band_name]
-            
-            valid_mask = band_data != nodata_value
-            normalized_band = np.full_like(band_data, 0.0, dtype=np.float32)  # Use 0.0 for nodata in normalized space
-            normalized_band[valid_mask] = (band_data[valid_mask] - band_range["min"]) / (band_range["max"] - band_range["min"])
-            normalized_band = np.clip(normalized_band, 0, 1)
-            
-            normalized_scene[:, :, i] = normalized_band
-        
-        return normalized_scene
     @staticmethod
     def _normalize_scene_static(scene_data, band_names, nodata_value):
         """Static normalization method - convert int16 to normalized float32"""
@@ -737,25 +679,9 @@ class LandsatSequenceDataset(Dataset):
             print(f"Valid sequences after filtering: {len(self.tile_sequences)}")
 
     def __len__(self) -> int:
-        """Return length based on cached data if available, otherwise tile sequences"""
-        if self.cached_data is not None:
-            return len(self.cached_data)
         return len(self.tile_sequences)
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Get item - use cached data if available, otherwise load from disk"""
-        if self.cached_data is not None:
-            if idx >= len(self.cached_data):
-                raise IndexError(f"Index {idx} out of range for cached data length {len(self.cached_data)}")
-            
-            # Get FP16 cached data and convert to appropriate precision for training
-            input_tensor, target_tensor = self.cached_data[idx]
-            if str(self.precision) == "32":
-                input_tensor = input_tensor.to(torch.float32)
-                target_tensor = target_tensor.to(torch.float32)
-            
-            return input_tensor, target_tensor
-        
         # Fallback to disk loading
         if idx >= len(self.tile_sequences):
             raise IndexError(f"Index {idx} out of range for tile sequences length {len(self.tile_sequences)}")
@@ -808,7 +734,6 @@ class LandsatDataModule(pl.LightningDataModule):
         test_years: Optional[List[int]] = None,
         debug_monthly_split: bool = False,
         debug_year: int = 2014,
-        load_to_ram: bool = True,
         interpolated_scenes_file: str = "interpolated.txt",
         tile_size: int = 128,
         tile_overlap: float = 0.0,
@@ -825,7 +750,6 @@ class LandsatDataModule(pl.LightningDataModule):
         self.test_years = test_years
         self.debug_monthly_split = debug_monthly_split
         self.debug_year = debug_year
-        self.load_to_ram = load_to_ram
         self.interpolated_scenes_file = interpolated_scenes_file
         self.tile_size = tile_size
         self.tile_overlap = tile_overlap
@@ -881,12 +805,6 @@ class LandsatDataModule(pl.LightningDataModule):
                 tile_overlap=self.tile_overlap,
                 precision=self.precision
             )
-
-            if self.load_to_ram:
-                print("🔄 Loading train/val datasets to RAM...")
-                self.train_dataset._preload_to_ram()
-                self.val_dataset._preload_to_ram()
-                self.test_dataset._preload_to_ram()
 
     def train_dataloader(self):
         return DataLoader(
