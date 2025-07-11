@@ -14,6 +14,7 @@ from collections import defaultdict
 from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
 from functools import partial
+import multiprocessing as mp
 
 BAND_RANGES = {
     "red": {"min": 1.0, "max": 10000.0},
@@ -64,101 +65,109 @@ def _load_sequence_worker_global(args):
     """Global worker function for multiprocessing"""
     idx, dataset_root, city, tile_row, tile_col, input_months, output_months, band_names = args
     
-    # Create a temporary dataset instance just for loading
-    from pathlib import Path
-    import numpy as np
+    # # Add debugging
+    # if idx % 25 == 0:
+    #     print(f"Processing sequence {idx}")
     
-    def load_raster_local(file_path):
-        try:
-            with rasterio.open(file_path) as src:
-                data = src.read(1).astype(np.float32)
-                if src.nodata is not None:
-                    data[data == src.nodata] = 0
-                return data
-        except Exception as e:
-            print(f"Error loading {file_path}: {e}")
-            return np.zeros((128, 128), dtype=np.float32)
-    
-    def load_scene_tile_local(dataset_root, city, month, tile_row, tile_col, band_names):
-        # Simplified version of _load_scene_tile for worker
-        cities_dir = Path(dataset_root) / "Cities_Tiles" / city
-        dem_dir = Path(dataset_root) / "DEM_2014_Tiles" / city
+    try:
+        # Move all imports to the top to avoid import issues in multiprocessing        
+        def load_raster_local(file_path):
+            try:
+                with rasterio.open(file_path) as src:
+                    data = src.read(1).astype(np.float32)
+                    if src.nodata is not None:
+                        data[data == src.nodata] = 0
+                    return data
+            except Exception as e:
+                # Silent fallback - don't print in worker process
+                return np.zeros((128, 128), dtype=np.float32)
         
-        # Find scene directory for this month
-        scene_dir = None
-        for d in cities_dir.iterdir():
-            if d.is_dir():
-                try:
-                    from datetime import datetime
-                    date_obj = datetime.fromisoformat(d.name.replace('Z', '+00:00'))
-                    month_key = f"{date_obj.year}-{date_obj.month:02d}"
-                    if month_key == month:
-                        scene_dir = d
-                        break
-                except:
-                    continue
+        def load_scene_tile_local(dataset_root, city, month, tile_row, tile_col, band_names):
+            cities_dir = Path(dataset_root) / "Cities_Tiles" / city
+            dem_dir = Path(dataset_root) / "DEM_2014_Tiles" / city
+            
+            # Find scene directory for this month
+            scene_dir = None
+            if cities_dir.exists():
+                for d in cities_dir.iterdir():
+                    if d.is_dir():
+                        try:
+                            date_obj = datetime.fromisoformat(d.name.replace('Z', '+00:00'))
+                            month_key = f"{date_obj.year}-{date_obj.month:02d}"
+                            if month_key == month:
+                                scene_dir = d
+                                break
+                        except:
+                            continue
+            
+            if scene_dir is None:
+                return np.zeros((128, 128, 9), dtype=np.float32)
+            
+            # Load DEM
+            dem_path = dem_dir / f"DEM_row_{tile_row:03d}_col_{tile_col:03d}.tif"
+            dem = load_raster_local(str(dem_path))
+            
+            # Load other bands
+            bands = [dem]
+            for band_name in band_names[1:]:  # Skip DEM
+                tile_path = scene_dir / f"{band_name}_row_{tile_row:03d}_col_{tile_col:03d}.tif"
+                band_data = load_raster_local(str(tile_path))
+                bands.append(band_data)
+            
+            return np.stack(bands, axis=-1)
         
-        if scene_dir is None:
-            return np.zeros((128, 128, 9), dtype=np.float32)
+        def normalize_scene_local(scene_data, band_names):
+            # Simplified normalization
+            BAND_RANGES = {
+                "red": {"min": 1.0, "max": 10000.0},
+                "ndwi": {"min": -10000.0, "max": 10000.0},
+                "ndvi": {"min": -10000.0, "max": 10000.0},
+                "ndbi": {"min": -10000.0, "max": 10000.0},
+                "LST": {"min": -189.0, "max": 211.0},
+                "green": {"min": 1.0, "max": 10000.0},
+                "blue": {"min": 1.0, "max": 10000.0},
+                "DEM": {"min": 9899.0, "max": 13110.0},
+                "albedo": {"min": 1.0, "max": 9980.0}
+            }
+            
+            normalized_scene = scene_data.copy()
+            for i, band_name in enumerate(band_names):
+                band_data = scene_data[:, :, i]
+                band_range = BAND_RANGES[band_name]
+                valid_mask = band_data != 0
+                normalized_band = np.zeros_like(band_data, dtype=np.float32)
+                normalized_band[valid_mask] = (band_data[valid_mask] - band_range["min"]) / (band_range["max"] - band_range["min"])
+                normalized_band = np.clip(normalized_band, 0, 1)
+                normalized_scene[:, :, i] = normalized_band
+            
+            return normalized_scene
         
-        # Load DEM
-        dem_path = dem_dir / f"DEM_row_{tile_row:03d}_col_{tile_col:03d}.tif"
-        dem = load_raster_local(str(dem_path))
+        # Load input sequence
+        input_scenes = []
+        for month in input_months:
+            scene = load_scene_tile_local(dataset_root, city, month, tile_row, tile_col, band_names)
+            normalized_scene = normalize_scene_local(scene, band_names)
+            input_scenes.append(normalized_scene)
         
-        # Load other bands
-        bands = [dem]
-        for band_name in band_names[1:]:  # Skip DEM
-            tile_path = scene_dir / f"{band_name}_row_{tile_row:03d}_col_{tile_col:03d}.tif"
-            band_data = load_raster_local(str(tile_path))
-            bands.append(band_data)
+        # Load output sequence
+        output_scenes = []
+        for month in output_months:
+            scene = load_scene_tile_local(dataset_root, city, month, tile_row, tile_col, band_names)
+            normalized_scene = normalize_scene_local(scene, band_names)
+            lst_only = normalized_scene[:, :, 1:2]
+            output_scenes.append(lst_only)
         
-        return np.stack(bands, axis=-1)
-    
-    def normalize_scene_local(scene_data, band_names):
-        # Simplified normalization
-        BAND_RANGES = {
-            "red": {"min": 1.0, "max": 10000.0},
-            "ndwi": {"min": -10000.0, "max": 10000.0},
-            "ndvi": {"min": -10000.0, "max": 10000.0},
-            "ndbi": {"min": -10000.0, "max": 10000.0},
-            "LST": {"min": -189.0, "max": 211.0},
-            "green": {"min": 1.0, "max": 10000.0},
-            "blue": {"min": 1.0, "max": 10000.0},
-            "DEM": {"min": 9899.0, "max": 13110.0},
-            "albedo": {"min": 1.0, "max": 9980.0}
-        }
+        return idx, (
+            torch.from_numpy(np.stack(input_scenes, axis=0)),
+            torch.from_numpy(np.stack(output_scenes, axis=0))
+        )
         
-        normalized_scene = scene_data.copy()
-        for i, band_name in enumerate(band_names):
-            band_data = scene_data[:, :, i]
-            band_range = BAND_RANGES[band_name]
-            valid_mask = band_data != 0
-            normalized_band = np.zeros_like(band_data, dtype=np.float32)
-            normalized_band[valid_mask] = (band_data[valid_mask] - band_range["min"]) / (band_range["max"] - band_range["min"])
-            normalized_band = np.clip(normalized_band, 0, 1)
-            normalized_scene[:, :, i] = normalized_band
-        
-        return normalized_scene
-    
-    # Load input sequence
-    input_scenes = []
-    for month in input_months:
-        scene = load_scene_tile_local(dataset_root, city, month, tile_row, tile_col, band_names)
-        normalized_scene = normalize_scene_local(scene, band_names)
-        input_scenes.append(normalized_scene)
-    
-    # Load output sequence
-    output_scenes = []
-    for month in output_months:
-        scene = load_scene_tile_local(dataset_root, city, month, tile_row, tile_col, band_names)
-        normalized_scene = normalize_scene_local(scene, band_names)
-        lst_only = normalized_scene[:, :, 1:2]
-        output_scenes.append(lst_only)
-    
-    return idx, (
-        torch.from_numpy(np.stack(input_scenes, axis=0)),
-        torch.from_numpy(np.stack(output_scenes, axis=0))
-    )
+    except Exception as e:
+        # Return dummy data if there's an error
+        return idx, (
+            torch.zeros((len(input_months), 128, 128, 9), dtype=torch.float32),
+            torch.zeros((len(output_months), 128, 128, 1), dtype=torch.float32)
+        )
 
 class LandsatSequenceDataset(Dataset):
     def __init__(
@@ -229,9 +238,10 @@ class LandsatSequenceDataset(Dataset):
             
             with Pool(processes=optimal_workers) as pool:
                 results = list(tqdm(
-                    pool.imap(_load_sequence_worker_global, worker_args),
+                    pool.imap(_load_sequence_worker_global, worker_args),  # Remove chunksize=1
                     total=len(worker_args),
-                    desc=f"Loading to RAM ({optimal_workers} cores)"
+                    desc=f"Loading to RAM ({optimal_workers} cores)"  # Remove smoothing
+                    # Remove unit parameter to match working version
                 ))
             
             # Store results
