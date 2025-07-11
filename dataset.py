@@ -16,14 +16,14 @@ from multiprocessing import Pool, cpu_count
 from functools import partial
 
 BAND_RANGES = {
-    "DEM": {"min": 9899.0, "max": 13110.0},
-    "LST": {"min": -189.0, "max": 211.0},
     "red": {"min": 1.0, "max": 10000.0},
+    "ndwi": {"min": -10000.0, "max": 10000.0},
+    "ndvi": {"min": -10000.0, "max": 10000.0},
+    "ndbi": {"min": -10000.0, "max": 10000.0},
+    "LST": {"min": -189.0, "max": 211.0},
     "green": {"min": 1.0, "max": 10000.0},
     "blue": {"min": 1.0, "max": 10000.0},
-    "ndvi": {"min": -10000.0, "max": 10000.0},
-    "ndwi": {"min": -10000.0, "max": 10000.0},
-    "ndbi": {"min": -10000.0, "max": 10000.0},
+    "DEM": {"min": 9899.0, "max": 13110.0},
     "albedo": {"min": 1.0, "max": 9980.0}
 }
 

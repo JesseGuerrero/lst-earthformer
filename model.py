@@ -9,6 +9,7 @@ import numpy as np
 from typing import Dict, Any, Tuple, Optional, List
 from pathlib import Path
 from dataset import BAND_RANGES
+import io
 
 class LandsatLSTPredictor(pl.LightningModule):
     def __init__(
@@ -110,9 +111,9 @@ class LandsatLSTPredictor(pl.LightningModule):
             return torch.tensor(0.0, device=predictions.device)
 
     def create_landsat_visualization(self, inputs: torch.Tensor, targets: torch.Tensor, 
-                            predictions: Optional[torch.Tensor] = None, 
-                            batch_idx: int = 0, max_samples: int = 2) -> plt.Figure:
-        """Create comprehensive visualization of Landsat data with raw TIFF values preserved"""
+                        predictions: Optional[torch.Tensor] = None, 
+                        batch_idx: int = 0, max_samples: int = 2) -> plt.Figure:
+        """Create comprehensive visualization of Landsat data with proper denormalization"""
         # Move to CPU and convert to numpy
         inputs_np = inputs.detach().cpu().numpy()
         targets_np = targets.detach().cpu().numpy()
@@ -129,113 +130,107 @@ class LandsatLSTPredictor(pl.LightningModule):
             axes = axes.reshape(1, -1)
         
         for sample_idx in range(batch_size):
-            middle_t = min(1, inputs_np.shape[1] - 1)  # Handle case where sequence length < 2
+            middle_t = min(1, inputs_np.shape[1] - 1)
             output_middle_t = min(1, targets_np.shape[1] - 1)
             
             # Extract data for this sample and timestep
             sample_input = inputs_np[sample_idx, middle_t]  # (H, W, C)
-            sample_target = targets_np[sample_idx, output_middle_t, :, :, 0]  # Use output_middle_t
+            sample_target = targets_np[sample_idx, output_middle_t, :, :, 0]  # (H, W)
             
-            # === RGB VISUALIZATION (properly scaled) ===
-            # Unscale RGB bands (indices 2, 3, 4) from int16 to reflectance [0, 1]
-            red_scaled = sample_input[:, :, 2] / 10000.0    # Red band
-            green_scaled = sample_input[:, :, 3] / 10000.0  # Green band  
-            blue_scaled = sample_input[:, :, 4] / 10000.0   # Blue band
+            # === RGB VISUALIZATION ===
+            # Extract normalized RGB bands and denormalize them
+            red_norm = sample_input[:, :, 2]  # Red band (normalized)
+            green_norm = sample_input[:, :, 3]  # Green band (normalized) 
+            blue_norm = sample_input[:, :, 4]  # Blue band (normalized)
             
-            # Create RGB composite and clip to valid range
-            rgb = np.stack([red_scaled, green_scaled, blue_scaled], axis=-1)
-            rgb = np.clip(rgb, 0, 1)  # Ensure valid reflectance range
+            # Denormalize to reflectance values (0-1)
+            red_refl = red_norm * (BAND_RANGES["red"]["max"] - BAND_RANGES["red"]["min"]) + BAND_RANGES["red"]["min"]
+            green_refl = green_norm * (BAND_RANGES["green"]["max"] - BAND_RANGES["green"]["min"]) + BAND_RANGES["green"]["min"]
+            blue_refl = blue_norm * (BAND_RANGES["blue"]["max"] - BAND_RANGES["blue"]["min"]) + BAND_RANGES["blue"]["min"]
+            
+            # Convert to reflectance (divide by 10000) and clip
+            red_refl = np.clip(red_refl / 10000.0, 0, 1)
+            green_refl = np.clip(green_refl / 10000.0, 0, 1)
+            blue_refl = np.clip(blue_refl / 10000.0, 0, 1)
+            
+            # Create RGB composite
+            rgb = np.stack([red_refl, green_refl, blue_refl], axis=-1)
             
             # Handle nodata values (set to black)
             nodata_mask = (sample_input[:, :, 2] == 0) | (sample_input[:, :, 3] == 0) | (sample_input[:, :, 4] == 0)
             rgb[nodata_mask] = 0
             
             # === NDVI VISUALIZATION ===
-            ndvi_scaled = sample_input[:, :, 5] / 10000.0  # NDVI band
-            ndvi_scaled = np.clip(ndvi_scaled, -1, 1)
-            ndvi_masked = np.where(sample_input[:, :, 5] == 0, np.nan, ndvi_scaled)
+            ndvi_norm = sample_input[:, :, 5]  # NDVI band (normalized)
+            ndvi_raw = ndvi_norm * (BAND_RANGES["ndvi"]["max"] - BAND_RANGES["ndvi"]["min"]) + BAND_RANGES["ndvi"]["min"]
+            ndvi_scaled = ndvi_raw / 10000.0  # Convert back to -1 to 1 range
+            ndvi_masked = np.where(ndvi_norm == 0, np.nan, ndvi_scaled)
             
-            # === LST VISUALIZATION - USE RAW VALUES ===
-            # The LST TIFF already contains temperature in the correct units
-            # No scaling needed - use the raw integer values directly
+            # === LST VISUALIZATION ===
+            # Denormalize LST
             lst_target_norm = sample_target.copy()
-            # Denormalize LST for visualization
-            lst_range = BAND_RANGES["LST"]  # You'll need to import this
-            lst_target_raw = lst_target_norm * (lst_range["max"] - lst_range["min"]) + lst_range["min"]
-
+            lst_target_raw = lst_target_norm * (BAND_RANGES["LST"]["max"] - BAND_RANGES["LST"]["min"]) + BAND_RANGES["LST"]["min"]
             
-            # Only mask true nodata values (typically 0 or specific nodata value)
-            # Check for reasonable temperature ranges to identify nodata
-            # Reasonable LST range might be -50°F to 150°F (-45°C to 65°C)
+            # Mask unreasonable values
             reasonable_temp_mask = (lst_target_raw >= -50) & (lst_target_raw <= 150)
-            lst_target_masked = np.where(reasonable_temp_mask, lst_target_raw, np.nan)
-            
-            # Print raw LST statistics for debugging
-            valid_lst_values = lst_target_raw[reasonable_temp_mask]
-            if len(valid_lst_values) > 0:
-                print(f"Sample {sample_idx}: Raw LST values - Min: {np.min(valid_lst_values):.1f}, "
-                    f"Max: {np.max(valid_lst_values):.1f}, Mean: {np.mean(valid_lst_values):.1f}")
-                
-                # Also print some actual pixel values for verification
-                center_y, center_x = lst_target_raw.shape[0]//2, lst_target_raw.shape[1]//2
-                center_region = lst_target_raw[center_y-2:center_y+3, center_x-2:center_x+3]
-                print(f"Center region LST values:\n{center_region}")
-            else:
-                print(f"Sample {sample_idx}: No valid LST values found!")
+            lst_target_masked = np.where(reasonable_temp_mask & (lst_target_norm != 0), lst_target_raw, np.nan)
             
             # Plot RGB composite
             axes[sample_idx, 0].imshow(rgb)
-            axes[sample_idx, 0].set_title(f'Sample {sample_idx}: RGB Composite\n(t={middle_t}, reflectance)')
+            axes[sample_idx, 0].set_title(f'Sample {sample_idx}: RGB Composite\n(t={middle_t})')
             axes[sample_idx, 0].axis('off')
             
-            # Plot NDVI with proper scaling
-            ndvi_im = axes[sample_idx, 1].imshow(ndvi_masked, cmap='RdYlGn', vmin=-1, vmax=1)
-            axes[sample_idx, 1].set_title(f'NDVI\n(t={middle_t}, -1 to 1)')
-            axes[sample_idx, 1].axis('off')
-            cbar1 = plt.colorbar(ndvi_im, ax=axes[sample_idx, 1], fraction=0.046, pad=0.04)
-            cbar1.set_label('NDVI Index')
+            # Plot NDVI
+            if not np.all(np.isnan(ndvi_masked)):
+                ndvi_im = axes[sample_idx, 1].imshow(ndvi_masked, cmap='RdYlGn', vmin=-1, vmax=1)
+                axes[sample_idx, 1].set_title(f'NDVI\n(t={middle_t})')
+                axes[sample_idx, 1].axis('off')
+                cbar1 = plt.colorbar(ndvi_im, ax=axes[sample_idx, 1], fraction=0.046, pad=0.04)
+                cbar1.set_label('NDVI')
+            else:
+                axes[sample_idx, 1].text(0.5, 0.5, 'No Valid NDVI', ha='center', va='center', transform=axes[sample_idx, 1].transAxes)
+                axes[sample_idx, 1].set_title(f'NDVI\n(t={middle_t})')
+                axes[sample_idx, 1].axis('off')
             
-            # Plot LST target with raw values
+            # Plot LST target
             if not np.all(np.isnan(lst_target_masked)):
-                # Use actual min/max from the data for accurate color mapping
-                temp_min = np.nanmin(lst_target_masked)
-                temp_max = np.nanmax(lst_target_masked)
+                temp_min = np.nanpercentile(lst_target_masked, 2)
+                temp_max = np.nanpercentile(lst_target_masked, 98)
                 
-                # Ensure reasonable color scale range
-                if temp_max - temp_min < 1:  # If range is very small, expand it
+                if temp_max - temp_min < 1:
                     temp_center = (temp_min + temp_max) / 2
                     temp_min = temp_center - 10
                     temp_max = temp_center + 10
+                
+                lst_im = axes[sample_idx, 2].imshow(lst_target_masked, cmap='coolwarm', vmin=temp_min, vmax=temp_max)
+                axes[sample_idx, 2].set_title(f'LST Target\n({temp_min:.1f}-{temp_max:.1f}°F)')
+                axes[sample_idx, 2].axis('off')
+                cbar2 = plt.colorbar(lst_im, ax=axes[sample_idx, 2], fraction=0.046, pad=0.04)
+                cbar2.set_label('Temperature (°F)')
             else:
-                temp_min, temp_max = 32, 100  # fallback
-                print(f"Warning: Using fallback temperature range for sample {sample_idx}")
-                
-            lst_im = axes[sample_idx, 2].imshow(lst_target_masked, cmap='coolwarm', vmin=temp_min, vmax=temp_max)
-            axes[sample_idx, 2].set_title(f'LST Target (Raw TIFF)\n(t={middle_t}, {temp_min:.1f}-{temp_max:.1f}°F)')
-            axes[sample_idx, 2].axis('off')
-            cbar2 = plt.colorbar(lst_im, ax=axes[sample_idx, 2], fraction=0.046, pad=0.04)
-            cbar2.set_label('Temperature (°F)')
+                axes[sample_idx, 2].text(0.5, 0.5, 'No Valid LST', ha='center', va='center', transform=axes[sample_idx, 2].transAxes)
+                axes[sample_idx, 2].set_title(f'LST Target\n(t={output_middle_t})')
+                axes[sample_idx, 2].axis('off')
+                temp_min, temp_max = 32, 100  # fallback values
             
-            # Plot prediction if available (also use raw values)
+            # Plot prediction if available
             if predictions is not None:
-                sample_pred_raw = predictions_np[sample_idx, middle_t, :, :, 0]  # (H, W)
+                sample_pred_norm = predictions_np[sample_idx, output_middle_t, :, :, 0]  # (H, W)
+                sample_pred_raw = sample_pred_norm * (BAND_RANGES["LST"]["max"] - BAND_RANGES["LST"]["min"]) + BAND_RANGES["LST"]["min"]
                 
-                # Apply same reasonable temperature mask to predictions
                 pred_reasonable_mask = (sample_pred_raw >= -50) & (sample_pred_raw <= 150)
-                sample_pred_masked = np.where(pred_reasonable_mask, sample_pred_raw, np.nan)
+                sample_pred_masked = np.where(pred_reasonable_mask & (sample_pred_norm != 0), sample_pred_raw, np.nan)
                 
-                # Use same temperature range as target for comparison
-                pred_im = axes[sample_idx, 3].imshow(sample_pred_masked, cmap='coolwarm', vmin=temp_min, vmax=temp_max)
-                axes[sample_idx, 3].set_title(f'LST Prediction (Raw)\n(t={middle_t}, °F)')
-                axes[sample_idx, 3].axis('off')
-                cbar3 = plt.colorbar(pred_im, ax=axes[sample_idx, 3], fraction=0.046, pad=0.04)
-                cbar3.set_label('Temperature (°F)')
-                
-                # Print prediction statistics
-                valid_pred_values = sample_pred_raw[pred_reasonable_mask]
-                if len(valid_pred_values) > 0:
-                    print(f"Sample {sample_idx}: Raw Prediction values - Min: {np.min(valid_pred_values):.1f}, "
-                        f"Max: {np.max(valid_pred_values):.1f}, Mean: {np.mean(valid_pred_values):.1f}")
+                if not np.all(np.isnan(sample_pred_masked)):
+                    pred_im = axes[sample_idx, 3].imshow(sample_pred_masked, cmap='coolwarm', vmin=temp_min, vmax=temp_max)
+                    axes[sample_idx, 3].set_title(f'LST Prediction\n(t={output_middle_t})')
+                    axes[sample_idx, 3].axis('off')
+                    cbar3 = plt.colorbar(pred_im, ax=axes[sample_idx, 3], fraction=0.046, pad=0.04)
+                    cbar3.set_label('Temperature (°F)')
+                else:
+                    axes[sample_idx, 3].text(0.5, 0.5, 'No Valid Prediction', ha='center', va='center', transform=axes[sample_idx, 3].transAxes)
+                    axes[sample_idx, 3].set_title(f'LST Prediction\n(t={output_middle_t})')
+                    axes[sample_idx, 3].axis('off')
         
         plt.tight_layout()
         return fig
@@ -682,171 +677,51 @@ class LandsatLSTPredictor(pl.LightningModule):
         return wandb.Table(columns=columns, data=table_data)
     
     def log_images_to_wandb(self, inputs: torch.Tensor, targets: torch.Tensor,
-                       predictions: Optional[torch.Tensor] = None,
-                       stage: str = "train", batch_idx: int = 0):
-        """Enhanced image logging with comprehensive metadata"""
+                   predictions: Optional[torch.Tensor] = None,
+                   stage: str = "train", batch_idx: int = 0):
+        """Simplified image logging with proper error handling"""
         if not isinstance(self.logger, pl.loggers.WandbLogger):
             return
         
         try:
-            # Add debug info about tensor shapes and ranges
-            print(f"=== DEBUG: {stage} batch {batch_idx} ===")
-            print(f"Input shape: {inputs.shape}")
-            print(f"Target shape: {targets.shape}")
-            if predictions is not None:
-                print(f"Prediction shape: {predictions.shape}")
-                print(f"Target range: {targets.min().item():.1f} to {targets.max().item():.1f}")
-                print(f"Prediction range: {predictions.min().item():.1f} to {predictions.max().item():.1f}")
+            print(f"=== WandB Image Logging: {stage} batch {batch_idx} ===")
             
-            # Extract metadata for this batch
-            try:
-                metadata = self.extract_batch_metadata(None, batch_idx)
-            except Exception as meta_error:
-                print(f"Warning: Failed to extract metadata: {meta_error}")
-                metadata = {'samples_metadata': []}
+            # Create main visualization
+            fig1 = self.create_landsat_visualization(
+                inputs, targets, predictions, batch_idx, self.max_images_to_log
+            )
             
-            # Calculate statistics with error handling
-            try:
-                stats = self.calculate_image_statistics(inputs, targets, predictions)
-            except Exception as stats_error:
-                print(f"Warning: Failed to calculate statistics: {stats_error}")
-                stats = {
-                    'batch_size': inputs.shape[0],
-                    'sequence_length': inputs.shape[1],
-                    'spatial_dimensions': [inputs.shape[2], inputs.shape[3]],
-                    'error': str(stats_error)
-                }
+            # Convert figure to image buffer for wandb
+            buf = io.BytesIO()
+            fig1.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+            buf.seek(0)
             
-            # Create visualizations with error handling
-            try:
-                fig1 = self.create_landsat_visualization(
-                    inputs, targets, predictions, batch_idx, self.max_images_to_log
+            # Log to wandb
+            self.logger.experiment.log({
+                f"{stage}_landsat_visualization": wandb.Image(
+                    buf, 
+                    caption=f"{stage.title()} - Epoch {self.current_epoch}, Batch {batch_idx}"
                 )
-            except Exception as viz_error:
-                print(f"Warning: Failed to create main visualization: {viz_error}")
-                fig1 = None
+            }, step=self.global_step)
             
-            if fig1 is not None:
-                # Create enhanced caption with metadata
-                caption_parts = [
-                    f"{stage.title()} - Epoch {self.current_epoch}, Batch {batch_idx}",
-                    f"Samples: {len(metadata.get('samples_metadata', []))}",
-                ]
-                
-                # Add sample-specific info to caption
-                if metadata.get('samples_metadata'):
-                    sample_info = []
-                    for sample_meta in metadata['samples_metadata'][:2]:  # First 2 samples
-                        sample_info.append(f"{sample_meta['city']} ({sample_meta['tile_position']})")
-                    caption_parts.append(f"Cities/Tiles: {', '.join(sample_info)}")
-                    
-                    if len(metadata['samples_metadata']) > 2:
-                        caption_parts.append(f"+ {len(metadata['samples_metadata']) - 2} more")
-                
-                enhanced_caption = "\n".join(caption_parts)
-                
-                # Log main visualization with metadata
-                log_dict = {
-                    f"{stage}_landsat_tiles": wandb.Image(
-                        fig1, 
-                        caption=enhanced_caption
-                    ),
-                    f"{stage}_batch_metadata": metadata,
-                    f"{stage}_batch_statistics": stats,
-                }
-                
-                # Create and log metadata table with error handling
-                try:
-                    if metadata.get('samples_metadata'):
-                        table = self.create_enhanced_wandb_table(metadata, predictions)
-                        log_dict[f"{stage}_sample_details"] = table
-                except Exception as table_error:
-                    print(f"Warning: Failed to create metadata table: {table_error}")
-                
-                # Log everything
-                self.logger.experiment.log(log_dict, step=self.global_step)
-                plt.close(fig1)
-                
-                # Create temporal sequence for first sample with metadata
-                try:
-                    if inputs.shape[0] > 0:
-                        fig2 = self.create_temporal_sequence_viz(inputs, targets, predictions, sample_idx=0)
-                        
-                        if metadata.get('samples_metadata'):
-                            first_sample = metadata['samples_metadata'][0]
-                            temporal_caption = (
-                                f"{stage} Temporal Sequence - Epoch {self.current_epoch}\n"
-                                f"City: {first_sample['city']}, Tile: {first_sample['tile_position']}\n"
-                                f"Input: {first_sample['input_date_range']}\n"
-                                f"Output: {first_sample['output_date_range']}"
-                            )
-                        else:
-                            temporal_caption = f"{stage} Temporal Sequence - Epoch {self.current_epoch}"
-                        
-                        self.logger.experiment.log({
-                            f"{stage}_temporal_sequence": wandb.Image(fig2, caption=temporal_caption),
-                        }, step=self.global_step)
-                        
-                        plt.close(fig2)
-                        
-                        # Create difference visualization if we have predictions
-                        if predictions is not None:
-                            try:
-                                fig3 = self.create_difference_visualization(targets, predictions, sample_idx=0)
-                                
-                                if metadata.get('samples_metadata'):
-                                    first_sample = metadata['samples_metadata'][0]
-                                    error_caption = (
-                                        f"{stage} Prediction Errors - Epoch {self.current_epoch}\n"
-                                        f"City: {first_sample['city']}, Tile: {first_sample['tile_position']}\n"
-                                        f"MAE: {stats.get('mae_raw_fahrenheit', 'N/A'):.2f}°F, "
-                                        f"RMSE: {stats.get('rmse_raw_fahrenheit', 'N/A'):.2f}°F"
-                                    )
-                                else:
-                                    error_caption = f"{stage} Prediction Errors - Epoch {self.current_epoch}"
-                                
-                                self.logger.experiment.log({
-                                    f"{stage}_prediction_errors": wandb.Image(fig3, caption=error_caption)
-                                }, step=self.global_step)
-                                
-                                plt.close(fig3)
-                            except Exception as diff_error:
-                                print(f"Warning: Failed to create difference visualization: {diff_error}")
-                                
-                except Exception as temporal_error:
-                    print(f"Warning: Failed to create temporal visualizations: {temporal_error}")
+            plt.close(fig1)
+            buf.close()
             
-            else:
-                # If main visualization failed, log basic info
-                print("Main visualization failed, logging basic tensor info")
+            print("✅ Images logged to WandB successfully")
+            
+        except Exception as e:
+            print(f"❌ WandB image logging failed: {e}")
+            # Log basic stats as fallback
+            try:
                 self.logger.experiment.log({
                     f"{stage}_tensor_info": {
                         "input_shape": list(inputs.shape),
                         "target_shape": list(targets.shape),
-                        "prediction_shape": list(predictions.shape) if predictions is not None else None,
-                        "target_min": float(targets.min().item()),
-                        "target_max": float(targets.max().item()),
-                        "prediction_min": float(predictions.min().item()) if predictions is not None else None,
-                        "prediction_max": float(predictions.max().item()) if predictions is not None else None,
+                        "error": str(e)
                     }
                 }, step=self.global_step)
-        
-        except Exception as e:
-            print(f"Warning: Failed to log images to wandb: {e}")
-            # Log basic information at least
-            try:
-                if isinstance(self.logger, pl.loggers.WandbLogger):
-                    self.logger.experiment.log({
-                        f"{stage}_logging_error": {
-                            "error": str(e),
-                            "epoch": self.current_epoch,
-                            "batch_idx": batch_idx,
-                            "input_shape": list(inputs.shape),
-                            "target_shape": list(targets.shape)
-                        }
-                    }, step=self.global_step)
             except:
-                pass  # Fail silently if even basic logging fails
+                pass
     
     def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
         """Training step with enhanced image logging"""
@@ -854,10 +729,6 @@ class LandsatLSTPredictor(pl.LightningModule):
         
         # Forward pass
         predictions = self.forward(inputs)
-        with torch.no_grad():
-            print(f"Target range: {targets.min().item():.1f} to {targets.max().item():.1f}")
-            print(f"Prediction range: {predictions.min().item():.1f} to {predictions.max().item():.1f}")
-            print(f"Input LST range: {inputs[:,:,:,:,1].min().item():.1f} to {inputs[:,:,:,:,1].max().item():.1f}")
         
         # Calculate loss
         loss = self.masked_loss(predictions, targets)
