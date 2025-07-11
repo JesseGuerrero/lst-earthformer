@@ -134,39 +134,53 @@ class LandsatSequenceDataset(Dataset):
                 continue
         return 128, 128  # fallback
 
-    def _build_efficient_tile_sequences(self) -> List[Tuple[str, int, int, int, int, List[str], List[str]]]:
-        """Build tile sequences using efficient spatial tiling approach"""
-        print(f"\n🔄 Building efficient tile sequences for {self.split} split...")
-        
-        sequences = []
-        
-        for city in tqdm(self.cities, desc=f"Processing cities ({self.split})"):
-            monthly_scenes = self._get_monthly_scenes(city)
+    @staticmethod
+    def _process_city_sequences_static(
+        city: str,
+        dataset_root: str,
+        total_sequence_length: int,
+        input_sequence_length: int,
+        tile_size: int,
+        tile_overlap: float,
+        years: set,
+        allowed_months: Optional[set],
+        debug_monthly_split: bool,
+        interpolated_scenes: set
+    ) -> List[Tuple[str, int, int, int, int, List[str], List[str]]]:
+        """Static method to process a single city's sequences"""
+        try:
+            dataset_root = Path(dataset_root)
             
-            if len(monthly_scenes) < self.total_sequence_length:
-                continue
+            # Get monthly scenes for this city
+            monthly_scenes = LandsatSequenceDataset._get_monthly_scenes_static(
+                city, dataset_root, years, allowed_months, debug_monthly_split
+            )
+            
+            if len(monthly_scenes) < total_sequence_length:
+                return []
             
             sorted_months = sorted(monthly_scenes.keys())
+            sequences = []
             
             # Get scene dimensions for tiling (use first available scene)
             if sorted_months:
                 first_scene_path = monthly_scenes[sorted_months[0]]
-                scene_width, scene_height = self._get_scene_dimensions(city, first_scene_path)
+                scene_width, scene_height = LandsatSequenceDataset._get_scene_dimensions_static(
+                    city, first_scene_path
+                )
                 
-                # Generate tiles using Repo 1's approach
-                tile_coords = self._get_tiles(
-                    (scene_width, scene_height), 
-                    self.tile_size, 
-                    self.tile_overlap
+                # Generate tiles
+                tile_coords = LandsatSequenceDataset._get_tiles_static(
+                    (scene_width, scene_height), tile_size, tile_overlap
                 )
                 
                 # Build sequences for each tile
                 for tile_idx, (x_min, y_min, x_max, y_max) in enumerate(tile_coords):
-                    for i in range(len(sorted_months) - self.total_sequence_length + 1):
-                        input_months = sorted_months[i:i + self.input_sequence_length]
-                        output_months = sorted_months[i + self.input_sequence_length:i + self.total_sequence_length]
+                    for i in range(len(sorted_months) - total_sequence_length + 1):
+                        input_months = sorted_months[i:i + input_sequence_length]
+                        output_months = sorted_months[i + input_sequence_length:i + total_sequence_length]
                         
-                        if self._are_consecutive_months(input_months + output_months):
+                        if LandsatSequenceDataset._are_consecutive_months_static(input_months + output_months):
                             # Check if any output scenes are interpolated
                             has_interpolated_output = False
                             for month in output_months:
@@ -174,18 +188,196 @@ class LandsatSequenceDataset(Dataset):
                                 scene_dir = Path(scene_path)
                                 scene_date = scene_dir.name
                                 
-                                if self._is_scene_interpolated(city, scene_date):
+                                if LandsatSequenceDataset._is_scene_interpolated_static(
+                                    city, scene_date, interpolated_scenes
+                                ):
                                     has_interpolated_output = True
                                     break
                             
                             # Only include sequence if NO output scenes are interpolated
                             if not has_interpolated_output:
                                 # Verify all required files exist for this tile
-                                if self._verify_tile_files_exist(city, x_min, y_min, x_max, y_max, input_months + output_months):
+                                if LandsatSequenceDataset._verify_tile_files_exist_static(
+                                    city, x_min, y_min, x_max, y_max, input_months + output_months,
+                                    monthly_scenes, dataset_root
+                                ):
                                     sequences.append((
                                         city, x_min, y_min, x_max, y_max, input_months, output_months
                                     ))
+            
+            return sequences
         
+        except Exception as e:
+            print(f"Error processing city {city}: {e}")
+            return []
+        
+
+    @staticmethod
+    def _get_monthly_scenes_static(
+        city: str, 
+        dataset_root: Path, 
+        years: set, 
+        allowed_months: Optional[set], 
+        debug_monthly_split: bool
+    ) -> Dict[str, str]:
+        """Static method to get monthly scenes for a city"""
+        city_dir = dataset_root / "Dataset" / "Cities_Processed" / city
+        if not city_dir.exists():
+            return {}
+        
+        monthly_scenes = {}
+        scene_dirs = [d for d in city_dir.iterdir() if d.is_dir()]
+        
+        for scene_dir in scene_dirs:
+            try:
+                date_str = scene_dir.name
+                date_obj = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                
+                if date_obj.year not in years:
+                    continue
+                
+                if debug_monthly_split and allowed_months is not None:
+                    if date_obj.month not in allowed_months:
+                        continue
+                
+                month_key = f"{date_obj.year}-{date_obj.month:02d}"
+                
+                if month_key not in monthly_scenes:
+                    monthly_scenes[month_key] = str(scene_dir)
+                        
+            except Exception:
+                continue
+        
+        return monthly_scenes
+
+    @staticmethod
+    def _get_scene_dimensions_static(city: str, scene_path: str) -> Tuple[int, int]:
+        """Static method to get scene dimensions for tile calculation"""
+        scene_dir = Path(scene_path)
+        for band_file in scene_dir.glob("*.tif"):
+            try:
+                with rasterio.open(band_file) as src:
+                    return src.width, src.height
+            except:
+                continue
+        return 128, 128  # fallback
+
+    @staticmethod
+    def _get_tiles_static(img_size: Tuple[int, int], tile_size: int, tile_overlap: float) -> List[Tuple[int, int, int, int]]:
+        """Static method to generate tile coordinates"""
+        tiles = []
+        img_w, img_h = img_size
+        
+        stride_w = int((1 - tile_overlap) * tile_size)
+        stride_h = int((1 - tile_overlap) * tile_size)
+        
+        for y in range(0, img_h - tile_size + 1, stride_h):
+            for x in range(0, img_w - tile_size + 1, stride_w):
+                x2 = x + tile_size
+                y2 = y + tile_size
+                
+                if x2 <= img_w and y2 <= img_h:
+                    tiles.append((x, y, x2, y2))
+        
+        return tiles
+
+    @staticmethod
+    def _are_consecutive_months_static(months: List[str]) -> bool:
+        """Static method to check if months are consecutive"""
+        dates = []
+        for month_str in months:
+            year, month = map(int, month_str.split('-'))
+            dates.append((year, month))
+        
+        dates.sort()
+        
+        for i in range(1, len(dates)):
+            prev_year, prev_month = dates[i-1]
+            curr_year, curr_month = dates[i]
+            
+            if prev_month == 12:
+                expected_year, expected_month = prev_year + 1, 1
+            else:
+                expected_year, expected_month = prev_year, prev_month + 1
+            
+            if (curr_year, curr_month) != (expected_year, expected_month):
+                return False
+        
+        return True
+
+    @staticmethod
+    def _is_scene_interpolated_static(city: str, scene_date: str, interpolated_scenes: set) -> bool:
+        """Static method to check if scene is interpolated"""
+        scene_id = f"{city}/{scene_date}"
+        return scene_id in interpolated_scenes
+
+    @staticmethod
+    def _verify_tile_files_exist_static(
+        city: str, 
+        x_min: int, 
+        y_min: int, 
+        x_max: int, 
+        y_max: int, 
+        months: List[str],
+        monthly_scenes: Dict[str, str],
+        dataset_root: Path
+    ) -> bool:
+        """Static method to verify that all required band files exist for the tile region"""
+        for month in months:
+            if month not in monthly_scenes:
+                return False
+            
+            scene_path = Path(monthly_scenes[month])
+            
+            # Check that essential bands exist
+            essential_bands = ['LST', 'red', 'green', 'blue']
+            for band in essential_bands:
+                band_file = scene_path / f"{band}.tif"
+                if not band_file.exists():
+                    return False
+        
+        return True
+
+    def _build_efficient_tile_sequences(self) -> List[Tuple[str, int, int, int, int, List[str], List[str]]]:
+        """Build tile sequences using efficient spatial tiling approach with parallel processing"""
+        print(f"\n🔄 Building efficient tile sequences for {self.split} split...")
+        
+        if not self.cities:
+            return []
+        
+        # Use multiprocessing to process cities in parallel
+        num_cpu = min(cpu_count(), len(self.cities))
+        print(f"Using {num_cpu} CPU cores for parallel processing")
+        
+        # Create partial function with all necessary parameters
+        process_city_func = partial(
+            self._process_city_sequences_static,
+            dataset_root=str(self.dataset_root),
+            total_sequence_length=self.total_sequence_length,
+            input_sequence_length=self.input_sequence_length,
+            tile_size=self.tile_size,
+            tile_overlap=self.tile_overlap,
+            years=self.years,
+            allowed_months=getattr(self, 'allowed_months', None),
+            debug_monthly_split=self.debug_monthly_split,
+            interpolated_scenes=self.interpolated_scenes
+        )
+        
+        # Process cities in parallel
+        with Pool(processes=num_cpu) as pool:
+            city_results = list(tqdm(
+                pool.imap(process_city_func, self.cities, chunksize=1),
+                total=len(self.cities),
+                desc=f"Processing cities ({self.split})"
+            ))
+        
+        # Flatten results from all cities
+        sequences = []
+        for city_sequences in city_results:
+            if city_sequences:
+                sequences.extend(city_sequences)
+        
+        print(f"✅ Built {len(sequences)} tile sequences from {len(self.cities)} cities")
         return sequences
 
     def _verify_tile_files_exist(self, city: str, x_min: int, y_min: int, x_max: int, y_max: int, months: List[str]) -> bool:
