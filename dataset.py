@@ -488,7 +488,7 @@ class LandsatSequenceDataset(Dataset):
         self.cached_data = valid_cached_data
         
         print(f"✅ Cached {len(self.cached_data)} sequences in RAM as INT16→FP32 ({len(results) - len(self.cached_data)} failed)")
-    
+
     @staticmethod
     def _load_sequence_static(sequence_info, dataset_root, band_names, input_length, output_length, nodata_value):
         """Static method for parallel loading using native int16"""
@@ -582,6 +582,24 @@ class LandsatSequenceDataset(Dataset):
         except Exception:
             return None
 
+    @staticmethod
+    def _normalize_scene_static(scene_data, band_names, nodata_value):
+        """Static normalization method - convert int16 to normalized float32"""
+        # Convert from int16 to normalized float32
+        normalized_scene = np.zeros(scene_data.shape, dtype=np.float32)
+        
+        for i, band_name in enumerate(band_names):
+            band_data = scene_data[:, :, i].astype(np.float32)  # Convert to float for normalization
+            band_range = BAND_RANGES[band_name]
+            
+            valid_mask = band_data != nodata_value
+            normalized_band = np.full_like(band_data, 0.0, dtype=np.float32)  # Use 0.0 for nodata in normalized space
+            normalized_band[valid_mask] = (band_data[valid_mask] - band_range["min"]) / (band_range["max"] - band_range["min"])
+            normalized_band = np.clip(normalized_band, 0, 1)
+            
+            normalized_scene[:, :, i] = normalized_band
+        
+        return normalized_scene
     @staticmethod
     def _normalize_scene_static(scene_data, band_names, nodata_value):
         """Static normalization method - convert int16 to normalized float32"""
