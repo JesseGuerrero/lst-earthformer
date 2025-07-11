@@ -13,6 +13,7 @@ from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
 from functools import partial
 import multiprocessing as mp
+from rasterio.windows import Window
 
 BAND_RANGES = {
     "red": {"min": 1.0, "max": 10000.0},
@@ -27,35 +28,18 @@ BAND_RANGES = {
 }
 
 def load_interpolated_scenes(interpolated_file: str = "interpolated.txt") -> Set[str]:
-    """
-    Load list of interpolated scenes that should not be used as ground truth
-    
-    Args:
-        interpolated_file: Path to file containing interpolated scene identifiers
-        
-    Returns:
-        Set of scene identifiers in format "City_State/YYYY-MM-DDTHH:MM:SSZ"
-    """
+    """Load list of interpolated scenes that should not be used as ground truth"""
     interpolated_scenes = set()
     
     if os.path.exists(interpolated_file):
         with open(interpolated_file, 'r') as f:
             for line in f:
                 line = line.strip()
-                if line and not line.startswith('#'):  # Skip empty lines and comments
+                if line and not line.startswith('#'):
                     interpolated_scenes.add(line)
-        
         print(f"Loaded {len(interpolated_scenes)} interpolated scenes to exclude from ground truth")
-        
-        # Print some examples for verification
-        if interpolated_scenes:
-            print("Examples of interpolated scenes:")
-            for i, scene in enumerate(sorted(list(interpolated_scenes))[:5]):
-                print(f"  {scene}")
-            if len(interpolated_scenes) > 5:
-                print(f"  ... and {len(interpolated_scenes) - 5} more")
     else:
-        print(f"Warning: Interpolated scenes file '{interpolated_file}' not found. All scenes will be used as ground truth.")
+        print(f"Warning: Interpolated scenes file '{interpolated_file}' not found.")
     
     return interpolated_scenes
 
@@ -72,12 +56,13 @@ class LandsatSequenceDataset(Dataset):
         debug_monthly_split: bool = False,
         debug_year: int = 2014,
         load_to_ram: bool = True,
-        preload_dem: bool = True,
         interpolated_scenes_file: str = "interpolated.txt",
-        chunk_size: int = 100  # Increased default chunk size
+        tile_size: int = 128,
+        tile_overlap: float = 0.0,
+        nodata_fill_value: float = 0.0
     ):
         """
-        Dataset for Landsat sequence prediction using tiled data with year-based splits
+        Fast dataset using Repo 1's efficient tiling approach with Repo 2's sequence modeling
         """
         self.dataset_root = Path(dataset_root)
         self.input_sequence_length = input_sequence_length
@@ -86,10 +71,10 @@ class LandsatSequenceDataset(Dataset):
         self.split = split
         self.debug_monthly_split = debug_monthly_split
         self.debug_year = debug_year
-        self._scene_validation_cache = {}
-        self.preload_dem = preload_dem
+        self.tile_size = tile_size
+        self.tile_overlap = tile_overlap
+        self.nodata_fill_value = nodata_fill_value
         self.cached_data = None
-        self.cached_tiles = {}  # Cache for individual tiles
         
         # Load interpolated scenes to exclude from ground truth
         self.interpolated_scenes = load_interpolated_scenes(interpolated_scenes_file)
@@ -102,109 +87,167 @@ class LandsatSequenceDataset(Dataset):
         self.cities = self._get_all_cities()
         self.band_names = ['DEM', 'LST', 'red', 'green', 'blue', 'ndvi', 'ndwi', 'ndbi', 'albedo']
         
-        # Build tile sequences with interpolated scene filtering
-        self.tile_sequences = self._build_tile_sequences()
+        # Build tile sequences using Repo 1's efficient approach
+        self.tile_sequences = self._build_efficient_tile_sequences()
         
         # Print filtering statistics
-        self._print_filtering_stats()    
-                    
+        self._print_filtering_stats()
+        
         if debug_monthly_split:
             print(f"DEBUG {split} split: {len(self.cities)} cities, year {debug_year}, "
                   f"months {sorted(self.allowed_months)}, {len(self.tile_sequences)} tile sequences")
         else:
             print(f"{split} split: {len(self.cities)} cities, {len(self.years)} years "
                   f"({min(self.years)}-{max(self.years)}), {len(self.tile_sequences)} tile sequences")
+        
+        if load_to_ram:
+            self._preload_to_ram()
+
+    def _get_tiles(self, img_size: Tuple[int, int], tile_size: int, 
+                  tile_overlap: float) -> List[Tuple[int, int, int, int]]:
+        """Generate tile coordinates using Repo 1's efficient approach"""
+        tiles = []
+        img_w, img_h = img_size
+        
+        stride_w = int((1 - tile_overlap) * tile_size)
+        stride_h = int((1 - tile_overlap) * tile_size)
+        
+        for y in range(0, img_h - tile_size + 1, stride_h):
+            for x in range(0, img_w - tile_size + 1, stride_w):
+                x2 = x + tile_size
+                y2 = y + tile_size
+                
+                if x2 <= img_w and y2 <= img_h:
+                    tiles.append((x, y, x2, y2))
+        
+        return tiles
+
+    def _get_scene_dimensions(self, city: str, scene_path: str) -> Tuple[int, int]:
+        """Get scene dimensions for tile calculation"""
+        # Try to get dimensions from any available band file
+        scene_dir = Path(scene_path)
+        for band_file in scene_dir.glob("*.tif"):
+            try:
+                with rasterio.open(band_file) as src:
+                    return src.width, src.height
+            except:
+                continue
+        return 128, 128  # fallback
+
+    def _build_efficient_tile_sequences(self) -> List[Tuple[str, int, int, int, int, List[str], List[str]]]:
+        """Build tile sequences using efficient spatial tiling approach"""
+        print(f"\n🔄 Building efficient tile sequences for {self.split} split...")
+        
+        sequences = []
+        
+        for city in tqdm(self.cities, desc=f"Processing cities ({self.split})"):
+            monthly_scenes = self._get_monthly_scenes(city)
             
-    @staticmethod
-    def _load_sequence_for_cache(sequence_info, dataset_root, band_names):
-        """Static method for parallel loading of a single sequence"""
-        city, tile_row, tile_col, input_months, output_months = sequence_info
-        dataset_root = Path(dataset_root)
+            if len(monthly_scenes) < self.total_sequence_length:
+                continue
+            
+            sorted_months = sorted(monthly_scenes.keys())
+            
+            # Get scene dimensions for tiling (use first available scene)
+            if sorted_months:
+                first_scene_path = monthly_scenes[sorted_months[0]]
+                scene_width, scene_height = self._get_scene_dimensions(city, first_scene_path)
+                
+                # Generate tiles using Repo 1's approach
+                tile_coords = self._get_tiles(
+                    (scene_width, scene_height), 
+                    self.tile_size, 
+                    self.tile_overlap
+                )
+                
+                # Build sequences for each tile
+                for tile_idx, (x_min, y_min, x_max, y_max) in enumerate(tile_coords):
+                    for i in range(len(sorted_months) - self.total_sequence_length + 1):
+                        input_months = sorted_months[i:i + self.input_sequence_length]
+                        output_months = sorted_months[i + self.input_sequence_length:i + self.total_sequence_length]
+                        
+                        if self._are_consecutive_months(input_months + output_months):
+                            # Check if any output scenes are interpolated
+                            has_interpolated_output = False
+                            for month in output_months:
+                                scene_path = monthly_scenes[month]
+                                scene_dir = Path(scene_path)
+                                scene_date = scene_dir.name
+                                
+                                if self._is_scene_interpolated(city, scene_date):
+                                    has_interpolated_output = True
+                                    break
+                            
+                            # Only include sequence if NO output scenes are interpolated
+                            if not has_interpolated_output:
+                                # Verify all required files exist for this tile
+                                if self._verify_tile_files_exist(city, x_min, y_min, x_max, y_max, input_months + output_months):
+                                    sequences.append((
+                                        city, x_min, y_min, x_max, y_max, input_months, output_months
+                                    ))
+        
+        return sequences
+
+    def _verify_tile_files_exist(self, city: str, x_min: int, y_min: int, x_max: int, y_max: int, months: List[str]) -> bool:
+        """Verify that all required band files exist for the tile region"""
+        monthly_scenes = self._get_monthly_scenes(city)
+        
+        for month in months:
+            if month not in monthly_scenes:
+                return False
+            
+            scene_path = Path(monthly_scenes[month])
+            
+            # Check that essential bands exist
+            essential_bands = ['LST', 'red', 'green', 'blue']
+            for band in essential_bands:
+                band_file = scene_path / f"{band}.tif"
+                if not band_file.exists():
+                    return False
+        
+        return True
+
+    def _load_tile_from_scene(self, scene_path: str, band_name: str, x_min: int, y_min: int, x_max: int, y_max: int) -> np.ndarray:
+        """Load specific tile region using Repo 1's windowed reading approach"""
+        scene_dir = Path(scene_path)
+        
+        if band_name == 'DEM':
+            # Load DEM from separate directory structure
+            dem_path = self.dataset_root / "DEM_2014" / scene_dir.parent.parent.name / "DEM.tif"
+            file_path = dem_path
+        else:
+            file_path = scene_dir / f"{band_name}.tif"
         
         try:
-            # Load input sequence
-            input_scenes = []
-            for month in input_months:
-                scene = LandsatSequenceDataset._load_scene_tile_static(
-                    dataset_root, city, month, tile_row, tile_col, band_names
-                )
-                if scene is None:
-                    return None
-                normalized_scene = LandsatSequenceDataset._normalize_scene_static(scene, band_names)
-                input_scenes.append(normalized_scene)
+            window = Window(col_off=x_min, row_off=y_min, width=x_max-x_min, height=y_max-y_min)
             
-            # Load output sequence
-            output_scenes = []
-            for month in output_months:
-                scene = LandsatSequenceDataset._load_scene_tile_static(
-                    dataset_root, city, month, tile_row, tile_col, band_names
-                )
-                if scene is None:
-                    return None
-                normalized_scene = LandsatSequenceDataset._normalize_scene_static(scene, band_names)
-                lst_only = normalized_scene[:, :, 1:2]  # LST band only
-                output_scenes.append(lst_only)
-            
-            return input_scenes, output_scenes
-            
-        except Exception as e:
-            print(f"Error loading sequence {city} {tile_row},{tile_col}: {e}")
-            return None  
-              
-    @staticmethod
-    def _load_scene_tile_static(dataset_root, city, month, tile_row, tile_col, band_names):
-        """Static version of _load_scene_tile for multiprocessing"""
-        try:
-            # Get scene path
-            city_dir = dataset_root / "Cities_Tiles" / city
-            monthly_scenes = {}
-            
-            for scene_dir in city_dir.iterdir():
-                if scene_dir.is_dir():
-                    date_obj = datetime.fromisoformat(scene_dir.name.replace('Z', '+00:00'))
-                    month_key = f"{date_obj.year}-{date_obj.month:02d}"
-                    if month_key == month:
-                        monthly_scenes[month] = str(scene_dir)
-                        break
-            
-            if month not in monthly_scenes:
-                return None
+            with rasterio.open(file_path) as src:
+                tile_data = src.read(1, window=window).astype(np.float32)
                 
-            scene_dir = Path(monthly_scenes[month])
-            
-            # Load DEM
-            dem_path = dataset_root / "DEM_2014_Tiles" / city / f"DEM_row_{tile_row:03d}_col_{tile_col:03d}.tif"
-            with rasterio.open(dem_path) as src:
-                dem = src.read(1).astype(np.float32)
+                # Handle nodata values
                 if src.nodata is not None:
-                    dem[dem == src.nodata] = 0
-            
-            # Load other bands
-            bands = [dem]
-            for band_name in band_names[1:]:  # Skip DEM
-                tile_path = scene_dir / f"{band_name}_row_{tile_row:03d}_col_{tile_col:03d}.tif"
-                with rasterio.open(tile_path) as src:
-                    band_data = src.read(1).astype(np.float32)
-                    if src.nodata is not None:
-                        band_data[band_data == src.nodata] = 0
-                    bands.append(band_data)
-            
-            return np.stack(bands, axis=-1)
-            
-        except Exception:
-            return None
+                    tile_data[tile_data == src.nodata] = self.nodata_fill_value
+                
+                # Handle NaN values
+                tile_data = np.nan_to_num(tile_data, nan=self.nodata_fill_value)
+                
+                return tile_data
+                
+        except Exception as e:
+            # Return zeros if file doesn't exist or can't be read
+            return np.full((y_max - y_min, x_max - x_min), self.nodata_fill_value, dtype=np.float32)
 
-    @staticmethod
-    def _normalize_scene_static(scene_data, band_names):
-        """Static version of _normalize_scene for multiprocessing"""
+    def _normalize_scene(self, scene_data: np.ndarray) -> np.ndarray:
+        """Normalize scene data using Repo 1's approach"""
         normalized_scene = scene_data.copy()
         
-        for i, band_name in enumerate(band_names):
+        for i, band_name in enumerate(self.band_names):
             band_data = scene_data[:, :, i]
             band_range = BAND_RANGES[band_name]
             
-            valid_mask = band_data != 0
-            normalized_band = np.zeros_like(band_data, dtype=np.float32)
+            # Normalize to [0, 1], keeping NODATA as 0
+            valid_mask = band_data != self.nodata_fill_value
+            normalized_band = np.full_like(band_data, self.nodata_fill_value, dtype=np.float32)
             normalized_band[valid_mask] = (band_data[valid_mask] - band_range["min"]) / (band_range["max"] - band_range["min"])
             normalized_band = np.clip(normalized_band, 0, 1)
             
@@ -213,139 +256,153 @@ class LandsatSequenceDataset(Dataset):
         return normalized_scene
 
     def _preload_to_ram(self):
-        """Preload all dataset tiles to RAM for faster training"""
-        num_cpu = max(cpu_count(), 1)
-        print(f"🔄 Preloading {len(self.tile_sequences)} sequences to RAM with {num_cpu} cores...")
+        """Preload all tile sequences to RAM using multiprocessing"""
+        num_cpu = min(cpu_count(), len(self.tile_sequences))
+        print(f"🔄 Preloading {len(self.tile_sequences)} tile sequences to RAM with {num_cpu} cores...")
         
-        cached_sequences = []
-        
+        # Process in parallel
         with Pool(processes=num_cpu) as pool:
-            # Create partial function with self methods
-            load_func = partial(self._load_sequence_for_cache, 
-                            dataset_root=self.dataset_root,
-                            band_names=self.band_names)
+            load_func = partial(self._load_sequence_static, 
+                            dataset_root=str(self.dataset_root),
+                            band_names=self.band_names,
+                            input_length=self.input_sequence_length,
+                            output_length=self.output_sequence_length,
+                            nodata_value=self.nodata_fill_value)
             
-            # Process sequences in parallel
             results = list(tqdm(
                 pool.imap(load_func, self.tile_sequences, chunksize=10),
                 total=len(self.tile_sequences),
                 desc=f"Loading {self.split} data to RAM"
             ))
         
-        # Filter out failed loads
-        cached_sequences = [r for r in results if r is not None]
+        # FIXED: Keep valid indices and filter both sequences and results together
+        valid_sequences = []
+        valid_cached_data = []
         
-        # Convert to tensors and store
-        self.cached_data = []
-        for input_data, target_data in cached_sequences:
-            input_tensor = torch.from_numpy(np.stack(input_data, axis=0))
-            target_tensor = torch.from_numpy(np.stack(target_data, axis=0))
-            self.cached_data.append((input_tensor, target_tensor))
+        for i, result in enumerate(results):
+            if result is not None:
+                input_data, target_data = result
+                input_tensor = torch.from_numpy(np.stack(input_data, axis=0))
+                target_tensor = torch.from_numpy(np.stack(target_data, axis=0))
+                
+                valid_sequences.append(self.tile_sequences[i])
+                valid_cached_data.append((input_tensor, target_tensor))
         
-        print(f"✅ Cached {len(self.cached_data)} sequences in RAM ({len(self.tile_sequences) - len(self.cached_data)} failed)")
-    def _print_filtering_stats(self):
-        """Print statistics about interpolated scene filtering"""
-        if not self.interpolated_scenes:
-            return
+        # Update both tile_sequences and cached_data to maintain consistency
+        self.tile_sequences = valid_sequences
+        self.cached_data = valid_cached_data
+        
+        print(f"✅ Cached {len(self.cached_data)} sequences in RAM ({len(results) - len(self.cached_data)} failed)")
+
+    @staticmethod
+    def _load_sequence_static(sequence_info, dataset_root, band_names, input_length, output_length, nodata_value):
+        """Static method for parallel loading"""
+        city, x_min, y_min, x_max, y_max, input_months, output_months = sequence_info
+        dataset_root = Path(dataset_root)
+        
+        try:
+            # Load input sequence
+            input_scenes = []
+            for month in input_months:
+                scene_data = FastLandsatSequenceDataset._load_scene_tile_static(
+                    dataset_root, city, month, x_min, y_min, x_max, y_max, band_names, nodata_value
+                )
+                if scene_data is None:
+                    return None
+                
+                normalized_scene = FastLandsatSequenceDataset._normalize_scene_static(scene_data, band_names, nodata_value)
+                input_scenes.append(normalized_scene)
             
-        total_sequences_checked = 0
-        sequences_with_interpolated_output = 0
-        sequences_kept = len(self.tile_sequences)
-        
-        # We can't easily count filtered sequences without rebuilding, but we can show what was loaded
-        print(f"\n=== INTERPOLATED SCENE FILTERING STATS ===")
-        print(f"Interpolated scenes loaded: {len(self.interpolated_scenes)}")
-        print(f"Valid sequences after filtering: {sequences_kept}")
-        
-        # Check if any interpolated scenes affect current split years
-        affected_years = set()
-        for scene_id in self.interpolated_scenes:
-            try:
-                # Extract year from scene_id format: "City_State/YYYY-MM-DDTHH:MM:SSZ"
-                date_part = scene_id.split('/')[1]
-                year = int(date_part.split('-')[0])
-                if year in self.years:
-                    affected_years.add(year)
-            except:
-                continue
-        
-        if affected_years:
-            print(f"Interpolated scenes affect years in this split: {sorted(affected_years)}")
-        else:
-            print(f"No interpolated scenes affect years in this split: {sorted(self.years)}")
-        print(f"{'='*50}")
-    
-    def _is_scene_interpolated(self, city: str, scene_date: str) -> bool:
-        """
-        Check if a scene is in the interpolated scenes list
-        
-        Args:
-            city: City name (e.g., "Austin_TX")
-            scene_date: Scene date string (e.g., "2013-12-15T12:00:00Z")
+            # Load output sequence (LST only)
+            output_scenes = []
+            for month in output_months:
+                scene_data = FastLandsatSequenceDataset._load_scene_tile_static(
+                    dataset_root, city, month, x_min, y_min, x_max, y_max, band_names, nodata_value
+                )
+                if scene_data is None:
+                    return None
+                
+                normalized_scene = FastLandsatSequenceDataset._normalize_scene_static(scene_data, band_names, nodata_value)
+                lst_only = normalized_scene[:, :, 1:2]  # LST band only
+                output_scenes.append(lst_only)
             
-        Returns:
-            True if scene is interpolated and should not be used as ground truth
-        """
-        # Create scene identifier in the format from interpolated.txt
-        scene_id = f"{city}/{scene_date}"
-        return scene_id in self.interpolated_scenes
-    
-    def _normalize_scene(self, scene_data: np.ndarray) -> np.ndarray:
-        """Normalize scene data to [0, 1] range using predefined ranges"""
+            return input_scenes, output_scenes
+            
+        except Exception as e:
+            return None
+
+    @staticmethod
+    def _load_scene_tile_static(dataset_root, city, month, x_min, y_min, x_max, y_max, band_names, nodata_value):
+        """Static method to load a single scene tile"""
+        try:
+            # Get scene path
+            city_dir = dataset_root / "Dataset" / "Cities_Processed" / city
+            monthly_scenes = {}
+            
+            for scene_dir in city_dir.iterdir():
+                if scene_dir.is_dir():
+                    try:
+                        date_obj = datetime.fromisoformat(scene_dir.name.replace('Z', '+00:00'))
+                        month_key = f"{date_obj.year}-{date_obj.month:02d}"
+                        if month_key == month:
+                            monthly_scenes[month] = str(scene_dir)
+                            break
+                    except:
+                        continue
+            
+            if month not in monthly_scenes:
+                return None
+            
+            scene_path = Path(monthly_scenes[month])
+            
+            # Load all bands for this tile
+            bands = []
+            for band_name in band_names:
+                if band_name == 'DEM':
+                    # Load DEM from separate location
+                    dem_path = dataset_root / "Dataset" / "DEM_2014_Preprocessed" / city / "DEM.tif"
+                    file_path = dem_path
+                else:
+                    file_path = scene_path / f"{band_name}.tif"
+                
+                # Load tile using window
+                try:
+                    window = Window(col_off=x_min, row_off=y_min, width=x_max-x_min, height=y_max-y_min)
+                    with rasterio.open(file_path) as src:
+                        band_data = src.read(1, window=window).astype(np.float32)
+                        if src.nodata is not None:
+                            band_data[band_data == src.nodata] = nodata_value
+                        band_data = np.nan_to_num(band_data, nan=nodata_value)
+                        bands.append(band_data)
+                except:
+                    # Create fallback data if file doesn't exist
+                    fallback_data = np.full((y_max - y_min, x_max - x_min), nodata_value, dtype=np.float32)
+                    bands.append(fallback_data)
+            
+            return np.stack(bands, axis=-1)
+            
+        except Exception:
+            return None
+
+    @staticmethod
+    def _normalize_scene_static(scene_data, band_names, nodata_value):
+        """Static normalization method"""
         normalized_scene = scene_data.copy()
         
-        for i, band_name in enumerate(self.band_names):
+        for i, band_name in enumerate(band_names):
             band_data = scene_data[:, :, i]
             band_range = BAND_RANGES[band_name]
             
-            # Normalize to [0, 1], keeping NODATA as 0
-            valid_mask = band_data != 0
-            normalized_band = np.zeros_like(band_data, dtype=np.float32)
+            valid_mask = band_data != nodata_value
+            normalized_band = np.full_like(band_data, nodata_value, dtype=np.float32)
             normalized_band[valid_mask] = (band_data[valid_mask] - band_range["min"]) / (band_range["max"] - band_range["min"])
             normalized_band = np.clip(normalized_band, 0, 1)
             
             normalized_scene[:, :, i] = normalized_band
         
         return normalized_scene
-    
-    def _process_single_city(self, city: str) -> List[Tuple[str, int, int, List[str], List[str]]]:
-        """Process a single city and return its sequences, filtering out those with interpolated ground truth"""
-        city_sequences = []
-        
-        available_tiles = self._get_available_tiles(city)
-        monthly_scenes = self._get_monthly_scenes(city)
-        
-        if len(monthly_scenes) < self.total_sequence_length:
-            return city_sequences
-        
-        sorted_months = sorted(monthly_scenes.keys())
-        
-        for (tile_row, tile_col) in available_tiles.keys():
-            for i in range(len(sorted_months) - self.total_sequence_length + 1):
-                input_months = sorted_months[i:i + self.input_sequence_length]
-                output_months = sorted_months[i + self.input_sequence_length:i + self.total_sequence_length]
-                
-                if self._are_consecutive_months(input_months + output_months):
-                    if self._verify_tile_sequence_exists(city, tile_row, tile_col, input_months + output_months):
-                        
-                        # NEW: Check if any output scenes are interpolated
-                        has_interpolated_output = False
-                        for month in output_months:
-                            scene_path = monthly_scenes[month]
-                            scene_dir = Path(scene_path)
-                            scene_date = scene_dir.name  # e.g., "2013-12-15T12:00:00Z"
-                            
-                            if self._is_scene_interpolated(city, scene_date):
-                                has_interpolated_output = True
-                                break
-                        
-                        # Only include sequence if NO output scenes are interpolated
-                        if not has_interpolated_output:
-                            city_sequences.append((city, tile_row, tile_col, input_months, output_months))
-                        # Note: Input scenes can be interpolated - we only exclude from ground truth
-        
-        return city_sequences
 
+    # Include all other necessary methods from original Repo 2
     def _setup_debug_monthly_splits(self):
         """Setup debug monthly splits within a single year"""
         train_months = [1, 2, 3, 4, 5, 6, 7, 8]
@@ -356,33 +413,23 @@ class LandsatSequenceDataset(Dataset):
             self.allowed_months = set(train_months)
         elif self.split == 'val':
             self.allowed_months = set(val_months)
-        else:  # test
+        else:
             self.allowed_months = set(test_months)
         
         self.years = {self.debug_year}
-        
-        self.train_months = set(train_months)
-        self.val_months = set(val_months)
-        self.test_months = set(test_months)
-        
-        print(f"Debug monthly splits for year {self.debug_year}:")
-        print(f"  Train months: {sorted(train_months)} (Jan-Aug)")
-        print(f"  Val months: {sorted(val_months)} (Jun-Oct)")
-        print(f"  Test months: {sorted(test_months)} (Aug-Dec)")
-        print(f"  Current split ({self.split}): {sorted(self.allowed_months)}")
-    
+
     def _setup_year_based_splits(self, train_years, val_years, test_years):
         """Setup normal year-based splits"""
         if train_years is None or val_years is None or test_years is None:
-            all_years = list(range(2013, 2026))  # 2013 to 2025 inclusive
+            all_years = list(range(2013, 2026))
             n_years = len(all_years)
             
-            train_end = int(0.7 * n_years)  # 70% = ~9 years
-            val_end = int(0.85 * n_years)   # 15% = ~2 years
+            train_end = int(0.7 * n_years)
+            val_end = int(0.85 * n_years)
             
-            self.train_years = set(all_years[:train_end])           # 2013-2021 (9 years)
-            self.val_years = set(all_years[train_end:val_end])      # 2022-2023 (2 years) 
-            self.test_years = set(all_years[val_end:])              # 2024-2025 (2 years)
+            self.train_years = set(all_years[:train_end])
+            self.val_years = set(all_years[train_end:val_end])
+            self.test_years = set(all_years[val_end:])
         else:
             self.train_years = set(train_years)
             self.val_years = set(val_years)
@@ -398,32 +445,14 @@ class LandsatSequenceDataset(Dataset):
         self.allowed_months = None
 
     def _get_all_cities(self) -> List[str]:
-        """Get all available cities from the tiled dataset"""
-        cities_dir = self.dataset_root / "Cities_Tiles"
+        """Get all available cities"""
+        cities_dir = self.dataset_root / "Dataset" / "Cities_Processed"
         cities = [d.name for d in cities_dir.iterdir() if d.is_dir()]
         return sorted(cities)
-    
-    def _get_available_tiles(self, city: str) -> Dict[Tuple[int, int], bool]:
-        """Get all available tile positions for a city"""
-        dem_dir = self.dataset_root / "DEM_2014_Tiles" / city
-        available_tiles = {}
-        
-        if dem_dir.exists():
-            for dem_file in dem_dir.glob("DEM_row_*_col_*.tif"):
-                parts = dem_file.stem.split('_')
-                if len(parts) >= 4:
-                    try:
-                        row = int(parts[2])
-                        col = int(parts[4])
-                        available_tiles[(row, col)] = True
-                    except ValueError:
-                        continue
-        
-        return available_tiles
-    
+
     def _get_monthly_scenes(self, city: str) -> Dict[str, str]:
-        """Get one scene per month for a city from tiled data, filtered by years and months"""
-        city_dir = self.dataset_root / "Cities_Tiles" / city
+        """Get monthly scenes for a city"""
+        city_dir = self.dataset_root / "Dataset" / "Cities_Processed" / city
         if not city_dir.exists():
             return {}
         
@@ -432,102 +461,26 @@ class LandsatSequenceDataset(Dataset):
         
         for scene_dir in scene_dirs:
             try:
-                date_str = scene_dir.name  # e.g., "2016-12-26T18:10:25Z"
+                date_str = scene_dir.name
                 date_obj = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
                 
-                # Filter by years for this split
                 if date_obj.year not in self.years:
                     continue
                 
-                # Additional filtering for debug monthly split
                 if self.debug_monthly_split and self.allowed_months is not None:
                     if date_obj.month not in self.allowed_months:
                         continue
-                    
+                
                 month_key = f"{date_obj.year}-{date_obj.month:02d}"
                 
-                # Only keep first scene per month
                 if month_key not in monthly_scenes:
-                    if self._validate_tiled_scene(scene_dir):
-                        monthly_scenes[month_key] = str(scene_dir)
+                    monthly_scenes[month_key] = str(scene_dir)
                         
-            except Exception as e:
-                print(f"Warning: Could not parse date from {scene_dir.name}: {e}")
+            except Exception:
                 continue
         
         return monthly_scenes
-    
-    def _validate_tiled_scene(self, scene_dir: Path) -> bool:
-        """Check if scene has tile files"""
-        tif_files = list(scene_dir.glob("*.tif"))
-        return len(tif_files) > 0
-    
-    def _build_tile_sequences(self) -> List[Tuple[str, int, int, List[str], List[str]]]:
-        """Build consecutive monthly sequences for each tile position, filtering interpolated ground truth"""
-        if self.debug_monthly_split:
-            month_stats = {month: 0 for month in self.allowed_months}
-        else:
-            year_stats = {year: 0 for year in self.years}
-        
-        print(f"\n🔄 Building tile sequences for {self.split} split using {min(cpu_count(), len(self.cities))} cores...")
-        print(f"   Excluding {len(self.interpolated_scenes)} interpolated scenes from ground truth...")
-        
-        # Process cities in parallel
-        with Pool(processes=min(cpu_count(), len(self.cities))) as pool:
-            city_results = list(tqdm(
-                pool.imap(self._process_single_city, self.cities),
-                total=len(self.cities),
-                desc=f"Processing cities ({self.split})",
-                unit="city"
-            ))
-        
-        # Flatten results
-        sequences = [seq for city_seqs in city_results for seq in city_seqs]
-        
-        # Calculate statistics
-        for city, tile_row, tile_col, input_months, output_months in sequences:
-            if self.debug_monthly_split:
-                first_month = int(input_months[0].split('-')[1])
-                if first_month in month_stats:
-                    month_stats[first_month] += 1
-            else:
-                first_year = int(input_months[0].split('-')[0])
-                if first_year in year_stats:
-                    year_stats[first_year] += 1
-        
-        # Print statistics
-        if self.debug_monthly_split:
-            print(f"Sequences by month for {self.split} split (year {self.debug_year}):")
-            for month in sorted(month_stats.keys()):
-                month_name = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                                'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][month-1]
-                print(f"  {month:02d} ({month_name}): {month_stats[month]} sequences")
-        else:
-            print(f"Sequences by year for {self.split} split:")
-            for year in sorted(year_stats.keys()):
-                print(f"  {year}: {year_stats[year]} sequences")
-        
-        return sequences
-    
-    def _verify_tile_sequence_exists(self, city: str, tile_row: int, tile_col: int, months: List[str]) -> bool:
-        """Verify using cached scene validation"""
-        cache_key = (city, tile_row, tile_col)
-        
-        if cache_key not in self._scene_validation_cache:
-            monthly_scenes = self._get_monthly_scenes(city)
-            valid_months = set()
-            
-            for month, scene_path in monthly_scenes.items():
-                scene_dir = Path(scene_path)
-                lst_tile = scene_dir / f"LST_row_{tile_row:03d}_col_{tile_col:03d}.tif"
-                if lst_tile.exists():
-                    valid_months.add(month)
-            
-            self._scene_validation_cache[cache_key] = valid_months
-        
-        valid_months = self._scene_validation_cache[cache_key]
-        return all(month in valid_months for month in months)
-    
+
     def _are_consecutive_months(self, months: List[str]) -> bool:
         """Check if months are consecutive"""
         dates = []
@@ -550,68 +503,50 @@ class LandsatSequenceDataset(Dataset):
                 return False
         
         return True
-    
-    def _load_raster(self, file_path: str) -> np.ndarray:
-        """Load raster file and return as numpy array"""
-        try:
-            with rasterio.open(file_path) as src:
-                data = src.read(1).astype(np.float32)
-                if src.nodata is not None:
-                    data[data == src.nodata] = 0
-                return data
-        except Exception as e:
-            print(f"Error loading {file_path}: {e}")
-            return np.zeros((128, 128), dtype=np.float32)
-    
-    def _load_dem_tile(self, city: str, tile_row: int, tile_col: int) -> np.ndarray:
-        """Load DEM tile for the city and position"""
-        dem_path = self.dataset_root / "DEM_2014_Tiles" / city / f"DEM_row_{tile_row:03d}_col_{tile_col:03d}.tif"
-        return self._load_raster(str(dem_path))
-    
-    def _load_scene_tile(self, city: str, month: str, tile_row: int, tile_col: int) -> np.ndarray:
-        """Load all bands for a scene tile"""
-        monthly_scenes = self._get_monthly_scenes(city)
-        scene_dir = Path(monthly_scenes[month])
-        
-        # Load DEM (constant for city/tile position)
-        dem = self._load_dem_tile(city, tile_row, tile_col)
-        
-        # Load other bands
-        bands = [dem]  # Start with DEM
-        
-        for band_name in self.band_names[1:]:  # Skip DEM since we loaded it separately
-            tile_path = scene_dir / f"{band_name}_row_{tile_row:03d}_col_{tile_col:03d}.tif"
-            band_data = self._load_raster(str(tile_path))
-            bands.append(band_data)
-        
-        # Stack to (H, W, C)
-        scene_data = np.stack(bands, axis=-1)
-        return scene_data
-    
+
+    def _is_scene_interpolated(self, city: str, scene_date: str) -> bool:
+        """Check if scene is interpolated"""
+        scene_id = f"{city}/{scene_date}"
+        return scene_id in self.interpolated_scenes
+
+    def _print_filtering_stats(self):
+        """Print filtering statistics"""
+        if self.interpolated_scenes:
+            print(f"Loaded {len(self.interpolated_scenes)} interpolated scenes for filtering")
+            print(f"Valid sequences after filtering: {len(self.tile_sequences)}")
+
     def __len__(self) -> int:
-        return len(self.tile_sequences)
-    
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Returns cached data if available, otherwise loads from disk"""
+        """Return length based on cached data if available, otherwise tile sequences"""
         if self.cached_data is not None:
+            return len(self.cached_data)
+        return len(self.tile_sequences)
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Get item - use cached data if available, otherwise load from disk"""
+        if self.cached_data is not None:
+            if idx >= len(self.cached_data):
+                raise IndexError(f"Index {idx} out of range for cached data length {len(self.cached_data)}")
             return self.cached_data[idx]
         
-        # Fallback to original disk loading
-        city, tile_row, tile_col, input_months, output_months = self.tile_sequences[idx]
+        # Fallback to disk loading with efficient windowed reads
+        if idx >= len(self.tile_sequences):
+            raise IndexError(f"Index {idx} out of range for tile sequences length {len(self.tile_sequences)}")
+        
+        city, x_min, y_min, x_max, y_max, input_months, output_months = self.tile_sequences[idx]
         
         # Load input sequence
         input_scenes = []
         for month in input_months:
-            scene = self._load_scene_tile(city, month, tile_row, tile_col)
-            normalized_scene = self._normalize_scene(scene)
+            scene_data = self._load_scene_tile_from_disk(city, month, x_min, y_min, x_max, y_max)
+            normalized_scene = self._normalize_scene(scene_data)
             input_scenes.append(normalized_scene)
         
         # Load output sequence
         output_scenes = []
         for month in output_months:
-            scene = self._load_scene_tile(city, month, tile_row, tile_col)
-            normalized_scene = self._normalize_scene(scene)
-            lst_only = normalized_scene[:, :, 1:2]
+            scene_data = self._load_scene_tile_from_disk(city, month, x_min, y_min, x_max, y_max)
+            normalized_scene = self._normalize_scene(scene_data)
+            lst_only = normalized_scene[:, :, 1:2]  # LST band only
             output_scenes.append(lst_only)
         
         # Convert to tensors
@@ -620,7 +555,18 @@ class LandsatSequenceDataset(Dataset):
         
         return input_tensor, target_tensor
 
-# Updated LandsatDataModule class
+    def _load_scene_tile_from_disk(self, city: str, month: str, x_min: int, y_min: int, x_max: int, y_max: int) -> np.ndarray:
+        """Load scene tile from disk with efficient windowed reading"""
+        monthly_scenes = self._get_monthly_scenes(city)
+        scene_path = Path(monthly_scenes[month])
+        
+        bands = []
+        for band_name in self.band_names:
+            tile_data = self._load_tile_from_scene(str(scene_path), band_name, x_min, y_min, x_max, y_max)
+            bands.append(tile_data)
+        
+        return np.stack(bands, axis=-1)
+
 class LandsatDataModule(pl.LightningDataModule):
     def __init__(
         self,
@@ -628,14 +574,16 @@ class LandsatDataModule(pl.LightningDataModule):
         batch_size: int = 4,
         num_workers: int = 4,
         input_sequence_length: int = 3,
-        output_sequence_length: int = 3,  
+        output_sequence_length: int = 3,
         train_years: Optional[List[int]] = None,
         val_years: Optional[List[int]] = None,
         test_years: Optional[List[int]] = None,
         debug_monthly_split: bool = False,
         debug_year: int = 2014,
         load_to_ram: bool = True,
-        interpolated_scenes_file: str = "interpolated.txt"  # New parameter
+        interpolated_scenes_file: str = "interpolated.txt",
+        tile_size: int = 128,
+        tile_overlap: float = 0.0
     ):
         super().__init__()
         self.dataset_root = dataset_root
@@ -650,12 +598,12 @@ class LandsatDataModule(pl.LightningDataModule):
         self.debug_year = debug_year
         self.load_to_ram = load_to_ram
         self.interpolated_scenes_file = interpolated_scenes_file
-        self.preload_dem = True 
-        
+        self.tile_size = tile_size
+        self.tile_overlap = tile_overlap
+
     def setup(self, stage: Optional[str] = None):
-        """Setup datasets for each stage with interpolated scene filtering"""
+        """Setup datasets with fast loading"""
         if stage == "fit" or stage is None:
-            # Create datasets WITHOUT loading to RAM first
             self.train_dataset = LandsatSequenceDataset(
                 self.dataset_root,
                 input_sequence_length=self.input_sequence_length,
@@ -666,8 +614,10 @@ class LandsatDataModule(pl.LightningDataModule):
                 test_years=self.test_years,
                 debug_monthly_split=self.debug_monthly_split,
                 debug_year=self.debug_year,
+                load_to_ram=self.load_to_ram,
                 interpolated_scenes_file=self.interpolated_scenes_file,
-                load_to_ram=False  # Set to False initially
+                tile_size=self.tile_size,
+                tile_overlap=self.tile_overlap
             )
             
             self.val_dataset = LandsatSequenceDataset(
@@ -680,17 +630,11 @@ class LandsatDataModule(pl.LightningDataModule):
                 test_years=self.test_years,
                 debug_monthly_split=self.debug_monthly_split,
                 debug_year=self.debug_year,
+                load_to_ram=self.load_to_ram,
                 interpolated_scenes_file=self.interpolated_scenes_file,
-                load_to_ram=False  # Set to False initially
+                tile_size=self.tile_size,
+                tile_overlap=self.tile_overlap
             )
-            
-            # NOW load to RAM if requested (after both datasets are built)
-            if self.load_to_ram:
-                print("🔄 Loading datasets to RAM...")
-                self.train_dataset.load_to_ram = True
-                self.train_dataset._preload_to_ram()
-                self.val_dataset.load_to_ram = True  
-                self.val_dataset._preload_to_ram()
         
         if stage == "test" or stage is None:
             self.test_dataset = LandsatSequenceDataset(
@@ -703,8 +647,10 @@ class LandsatDataModule(pl.LightningDataModule):
                 test_years=self.test_years,
                 debug_monthly_split=self.debug_monthly_split,
                 debug_year=self.debug_year,
+                load_to_ram=self.load_to_ram,
                 interpolated_scenes_file=self.interpolated_scenes_file,
-                load_to_ram=self.load_to_ram
+                tile_size=self.tile_size,
+                tile_overlap=self.tile_overlap
             )
 
     def train_dataloader(self):
@@ -736,56 +682,3 @@ class LandsatDataModule(pl.LightningDataModule):
             pin_memory=True,
             persistent_workers=True if self.num_workers > 0 else False
         )
-
-
-# Usage example with interpolated scene filtering
-def test_interpolated_filtering():
-    """Test the interpolated scene filtering functionality"""
-    
-    print("=== TESTING INTERPOLATED SCENE FILTERING ===\n")
-    
-    # Create data module with interpolated scene filtering
-    data_module = LandsatDataModule(
-        dataset_root="./Data/ML",
-        batch_size=2,
-        input_sequence_length=3,
-        output_sequence_length=1,
-        debug_monthly_split=True,
-        debug_year=2014,
-        interpolated_scenes_file="./Data/ML/interpolated.txt"
-    )
-    
-    # Setup and analyze the results
-    data_module.setup("fit")
-    
-    print(f"Train sequences: {len(data_module.train_dataset.tile_sequences)}")
-    print(f"Val sequences: {len(data_module.val_dataset.tile_sequences)}")
-    
-    # Check specific sequences for interpolated scenes
-    if len(data_module.train_dataset.tile_sequences) > 0:
-        sample_seq = data_module.train_dataset.tile_sequences[0]
-        city, tile_row, tile_col, input_months, output_months = sample_seq
-        
-        print(f"\nSample sequence: {city} tile({tile_row},{tile_col})")
-        print(f"  Input months: {input_months}")
-        print(f"  Output months: {output_months}")
-        
-        # Verify no output months are interpolated
-        interpolated_scenes = data_module.train_dataset.interpolated_scenes
-        monthly_scenes = data_module.train_dataset._get_monthly_scenes(city)
-        
-        for month in output_months:
-            if month in monthly_scenes:
-                scene_path = monthly_scenes[month]
-                scene_dir = Path(scene_path)
-                scene_date = scene_dir.name
-                scene_id = f"{city}/{scene_date}"
-                
-                is_interpolated = scene_id in interpolated_scenes
-                print(f"    {month} ({scene_date}): {'INTERPOLATED' if is_interpolated else 'ORIGINAL'}")
-    
-    return data_module
-
-if __name__ == "__main__":
-    # Test the filtering
-    test_data_module = test_interpolated_filtering()
