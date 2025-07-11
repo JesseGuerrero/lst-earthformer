@@ -6,3 +6,4 @@ checkpoints/
 wandb/
 dataset-original.py
 dataset-ram.py
+README2.md
