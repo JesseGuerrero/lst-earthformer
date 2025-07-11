@@ -1,5 +1,3 @@
-# Enhanced dataset.py with interpolated scene filtering
-
 import os
 import torch
 import rasterio
@@ -74,6 +72,7 @@ class LandsatSequenceDataset(Dataset):
         debug_monthly_split: bool = False,
         debug_year: int = 2014,
         load_to_ram: bool = True,
+        preload_dem: bool = True,
         interpolated_scenes_file: str = "interpolated.txt",
         chunk_size: int = 100  # Increased default chunk size
     ):
@@ -88,6 +87,9 @@ class LandsatSequenceDataset(Dataset):
         self.debug_monthly_split = debug_monthly_split
         self.debug_year = debug_year
         self._scene_validation_cache = {}
+        self.preload_dem = preload_dem
+        self.cached_data = None
+        self.cached_tiles = {}  # Cache for individual tiles
         
         # Load interpolated scenes to exclude from ground truth
         self.interpolated_scenes = load_interpolated_scenes(interpolated_scenes_file)
@@ -105,14 +107,142 @@ class LandsatSequenceDataset(Dataset):
         
         # Print filtering statistics
         self._print_filtering_stats()    
-            
+                    
         if debug_monthly_split:
             print(f"DEBUG {split} split: {len(self.cities)} cities, year {debug_year}, "
                   f"months {sorted(self.allowed_months)}, {len(self.tile_sequences)} tile sequences")
         else:
             print(f"{split} split: {len(self.cities)} cities, {len(self.years)} years "
                   f"({min(self.years)}-{max(self.years)}), {len(self.tile_sequences)} tile sequences")
-    
+            
+    @staticmethod
+    def _load_sequence_for_cache(sequence_info, dataset_root, band_names):
+        """Static method for parallel loading of a single sequence"""
+        city, tile_row, tile_col, input_months, output_months = sequence_info
+        dataset_root = Path(dataset_root)
+        
+        try:
+            # Load input sequence
+            input_scenes = []
+            for month in input_months:
+                scene = LandsatSequenceDataset._load_scene_tile_static(
+                    dataset_root, city, month, tile_row, tile_col, band_names
+                )
+                if scene is None:
+                    return None
+                normalized_scene = LandsatSequenceDataset._normalize_scene_static(scene, band_names)
+                input_scenes.append(normalized_scene)
+            
+            # Load output sequence
+            output_scenes = []
+            for month in output_months:
+                scene = LandsatSequenceDataset._load_scene_tile_static(
+                    dataset_root, city, month, tile_row, tile_col, band_names
+                )
+                if scene is None:
+                    return None
+                normalized_scene = LandsatSequenceDataset._normalize_scene_static(scene, band_names)
+                lst_only = normalized_scene[:, :, 1:2]  # LST band only
+                output_scenes.append(lst_only)
+            
+            return input_scenes, output_scenes
+            
+        except Exception as e:
+            print(f"Error loading sequence {city} {tile_row},{tile_col}: {e}")
+            return None  
+              
+    @staticmethod
+    def _load_scene_tile_static(dataset_root, city, month, tile_row, tile_col, band_names):
+        """Static version of _load_scene_tile for multiprocessing"""
+        try:
+            # Get scene path
+            city_dir = dataset_root / "Cities_Tiles" / city
+            monthly_scenes = {}
+            
+            for scene_dir in city_dir.iterdir():
+                if scene_dir.is_dir():
+                    date_obj = datetime.fromisoformat(scene_dir.name.replace('Z', '+00:00'))
+                    month_key = f"{date_obj.year}-{date_obj.month:02d}"
+                    if month_key == month:
+                        monthly_scenes[month] = str(scene_dir)
+                        break
+            
+            if month not in monthly_scenes:
+                return None
+                
+            scene_dir = Path(monthly_scenes[month])
+            
+            # Load DEM
+            dem_path = dataset_root / "DEM_2014_Tiles" / city / f"DEM_row_{tile_row:03d}_col_{tile_col:03d}.tif"
+            with rasterio.open(dem_path) as src:
+                dem = src.read(1).astype(np.float32)
+                if src.nodata is not None:
+                    dem[dem == src.nodata] = 0
+            
+            # Load other bands
+            bands = [dem]
+            for band_name in band_names[1:]:  # Skip DEM
+                tile_path = scene_dir / f"{band_name}_row_{tile_row:03d}_col_{tile_col:03d}.tif"
+                with rasterio.open(tile_path) as src:
+                    band_data = src.read(1).astype(np.float32)
+                    if src.nodata is not None:
+                        band_data[band_data == src.nodata] = 0
+                    bands.append(band_data)
+            
+            return np.stack(bands, axis=-1)
+            
+        except Exception:
+            return None
+
+    @staticmethod
+    def _normalize_scene_static(scene_data, band_names):
+        """Static version of _normalize_scene for multiprocessing"""
+        normalized_scene = scene_data.copy()
+        
+        for i, band_name in enumerate(band_names):
+            band_data = scene_data[:, :, i]
+            band_range = BAND_RANGES[band_name]
+            
+            valid_mask = band_data != 0
+            normalized_band = np.zeros_like(band_data, dtype=np.float32)
+            normalized_band[valid_mask] = (band_data[valid_mask] - band_range["min"]) / (band_range["max"] - band_range["min"])
+            normalized_band = np.clip(normalized_band, 0, 1)
+            
+            normalized_scene[:, :, i] = normalized_band
+        
+        return normalized_scene
+
+    def _preload_to_ram(self):
+        """Preload all dataset tiles to RAM for faster training"""
+        num_cpu = max(cpu_count(), 1)
+        print(f"🔄 Preloading {len(self.tile_sequences)} sequences to RAM with {num_cpu} cores...")
+        
+        cached_sequences = []
+        
+        with Pool(processes=num_cpu) as pool:
+            # Create partial function with self methods
+            load_func = partial(self._load_sequence_for_cache, 
+                            dataset_root=self.dataset_root,
+                            band_names=self.band_names)
+            
+            # Process sequences in parallel
+            results = list(tqdm(
+                pool.imap(load_func, self.tile_sequences, chunksize=10),
+                total=len(self.tile_sequences),
+                desc=f"Loading {self.split} data to RAM"
+            ))
+        
+        # Filter out failed loads
+        cached_sequences = [r for r in results if r is not None]
+        
+        # Convert to tensors and store
+        self.cached_data = []
+        for input_data, target_data in cached_sequences:
+            input_tensor = torch.from_numpy(np.stack(input_data, axis=0))
+            target_tensor = torch.from_numpy(np.stack(target_data, axis=0))
+            self.cached_data.append((input_tensor, target_tensor))
+        
+        print(f"✅ Cached {len(self.cached_data)} sequences in RAM ({len(self.tile_sequences) - len(self.cached_data)} failed)")
     def _print_filtering_stats(self):
         """Print statistics about interpolated scene filtering"""
         if not self.interpolated_scenes:
@@ -463,20 +593,20 @@ class LandsatSequenceDataset(Dataset):
     
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """Returns cached data if available, otherwise loads from disk"""
-        # if self.cached_data is not None:
-        #     return self.cached_data[idx]
+        if self.cached_data is not None:
+            return self.cached_data[idx]
         
-        # Fallback to original disk loading (existing code remains unchanged)
+        # Fallback to original disk loading
         city, tile_row, tile_col, input_months, output_months = self.tile_sequences[idx]
         
-        # Load input sequence (can include interpolated scenes)
+        # Load input sequence
         input_scenes = []
         for month in input_months:
             scene = self._load_scene_tile(city, month, tile_row, tile_col)
             normalized_scene = self._normalize_scene(scene)
             input_scenes.append(normalized_scene)
         
-        # Load output sequence (guaranteed to be non-interpolated due to filtering)
+        # Load output sequence
         output_scenes = []
         for month in output_months:
             scene = self._load_scene_tile(city, month, tile_row, tile_col)
@@ -489,7 +619,6 @@ class LandsatSequenceDataset(Dataset):
         target_tensor = torch.from_numpy(np.stack(output_scenes, axis=0))
         
         return input_tensor, target_tensor
-
 
 # Updated LandsatDataModule class
 class LandsatDataModule(pl.LightningDataModule):
@@ -521,10 +650,12 @@ class LandsatDataModule(pl.LightningDataModule):
         self.debug_year = debug_year
         self.load_to_ram = load_to_ram
         self.interpolated_scenes_file = interpolated_scenes_file
+        self.preload_dem = True 
         
     def setup(self, stage: Optional[str] = None):
         """Setup datasets for each stage with interpolated scene filtering"""
         if stage == "fit" or stage is None:
+            # Create datasets WITHOUT loading to RAM first
             self.train_dataset = LandsatSequenceDataset(
                 self.dataset_root,
                 input_sequence_length=self.input_sequence_length,
@@ -536,7 +667,7 @@ class LandsatDataModule(pl.LightningDataModule):
                 debug_monthly_split=self.debug_monthly_split,
                 debug_year=self.debug_year,
                 interpolated_scenes_file=self.interpolated_scenes_file,
-                load_to_ram=self.load_to_ram
+                load_to_ram=False  # Set to False initially
             )
             
             self.val_dataset = LandsatSequenceDataset(
@@ -550,8 +681,16 @@ class LandsatDataModule(pl.LightningDataModule):
                 debug_monthly_split=self.debug_monthly_split,
                 debug_year=self.debug_year,
                 interpolated_scenes_file=self.interpolated_scenes_file,
-                load_to_ram=self.load_to_ram
+                load_to_ram=False  # Set to False initially
             )
+            
+            # NOW load to RAM if requested (after both datasets are built)
+            if self.load_to_ram:
+                print("🔄 Loading datasets to RAM...")
+                self.train_dataset.load_to_ram = True
+                self.train_dataset._preload_to_ram()
+                self.val_dataset.load_to_ram = True  
+                self.val_dataset._preload_to_ram()
         
         if stage == "test" or stage is None:
             self.test_dataset = LandsatSequenceDataset(
