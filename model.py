@@ -829,7 +829,7 @@ class LandsatLSTPredictor(pl.LightningModule):
         return loss
     
     def configure_optimizers(self):
-        """Configure optimizers"""
+        """Configure optimizers with proper AMP handling"""
         optimizer = torch.optim.AdamW(
             self.parameters(),
             lr=self.hparams.learning_rate,
@@ -837,7 +837,20 @@ class LandsatLSTPredictor(pl.LightningModule):
             betas=(0.9, 0.999)
         )
         
-        return optimizer
+        # Let PyTorch Lightning handle the scheduler
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, 
+            T_max=self.hparams.max_epochs,
+            eta_min=1e-6
+        )
+        
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "epoch"
+            }
+        }
 
 # Additional utility function to log dataset overview
 def log_dataset_overview_to_wandb(data_module, logger):
