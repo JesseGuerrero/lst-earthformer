@@ -55,11 +55,11 @@ class LandsatSequenceDataset(Dataset):
         test_years: Optional[List[int]] = None,
         debug_monthly_split: bool = False,
         debug_year: int = 2014,
-        load_to_ram: bool = True,
         interpolated_scenes_file: str = "interpolated.txt",
         tile_size: int = 128,
         tile_overlap: float = 0.0,
-        nodata_fill_value: float = 0.0
+        nodata_fill_value: float = 0.0,
+        precision: str = "32"
     ):
         """
         Fast dataset using Repo 1's efficient tiling approach with Repo 2's sequence modeling
@@ -74,6 +74,7 @@ class LandsatSequenceDataset(Dataset):
         self.tile_size = tile_size
         self.tile_overlap = tile_overlap
         self.nodata_fill_value = nodata_fill_value
+        self.precision = precision
         self.cached_data = None
         
         # Load interpolated scenes to exclude from ground truth
@@ -99,9 +100,6 @@ class LandsatSequenceDataset(Dataset):
         else:
             print(f"{split} split: {len(self.cities)} cities, {len(self.years)} years "
                   f"({min(self.years)}-{max(self.years)}), {len(self.tile_sequences)} tile sequences")
-        
-        if load_to_ram:
-            self._preload_to_ram()
 
     def _get_tiles(self, img_size: Tuple[int, int], tile_size: int, 
                   tile_overlap: float) -> List[Tuple[int, int, int, int]]:
@@ -450,9 +448,9 @@ class LandsatSequenceDataset(Dataset):
         return normalized_scene
 
     def _preload_to_ram(self):
-        """Preload all tile sequences to RAM using multiprocessing with native int16"""
+        """Preload all tile sequences to RAM using multiprocessing with FP16 storage (always)"""
         num_cpu = min(cpu_count(), len(self.tile_sequences))
-        print(f"🔄 Preloading {len(self.tile_sequences)} tile sequences to RAM with {num_cpu} cores...")
+        print(f"🔄 Preloading {len(self.tile_sequences)} tile sequences to RAM with {num_cpu} cores (FP16)...")
         
         # Process in parallel
         with Pool(processes=num_cpu) as pool:
@@ -466,7 +464,7 @@ class LandsatSequenceDataset(Dataset):
             results = list(tqdm(
                 pool.imap(load_func, self.tile_sequences, chunksize=10),
                 total=len(self.tile_sequences),
-                desc=f"Loading {self.split} data to RAM (INT16→FP32)"
+                desc=f"Loading {self.split} data to RAM (INT16→FP16)"
             ))
         
         # Keep valid indices and filter both sequences and results together
@@ -476,9 +474,9 @@ class LandsatSequenceDataset(Dataset):
         for i, result in enumerate(results):
             if result is not None:
                 input_data, target_data = result
-                # Data is converted to float32 for training after normalization
-                input_tensor = torch.from_numpy(np.stack(input_data, axis=0)).to(torch.float32)
-                target_tensor = torch.from_numpy(np.stack(target_data, axis=0)).to(torch.float32)
+                # Always cache in FP16 for memory savings
+                input_tensor = torch.from_numpy(np.stack(input_data, axis=0)).to(torch.float16)
+                target_tensor = torch.from_numpy(np.stack(target_data, axis=0)).to(torch.float16)
                 
                 valid_sequences.append(self.tile_sequences[i])
                 valid_cached_data.append((input_tensor, target_tensor))
@@ -487,7 +485,7 @@ class LandsatSequenceDataset(Dataset):
         self.tile_sequences = valid_sequences
         self.cached_data = valid_cached_data
         
-        print(f"✅ Cached {len(self.cached_data)} sequences in RAM as INT16→FP32 ({len(results) - len(self.cached_data)} failed)")
+        print(f"✅ Cached {len(self.cached_data)} sequences in RAM as FP16 ({len(results) - len(self.cached_data)} failed)")
 
     @staticmethod
     def _load_sequence_static(sequence_info, dataset_root, band_names, input_length, output_length, nodata_value):
@@ -665,7 +663,13 @@ class LandsatSequenceDataset(Dataset):
         """Get all available cities"""
         cities_dir = self.dataset_root / "Dataset" / "Cities_Processed"
         cities = [d.name for d in cities_dir.iterdir() if d.is_dir()]
-        return sorted(cities)
+        texas = []
+        for city in cities:
+            if "_TX" in city:
+                texas.append(city)
+        # return sorted(cities)
+        print("Loading", texas)
+        return sorted(texas)
 
     def _get_monthly_scenes(self, city: str) -> Dict[str, str]:
         """Get monthly scenes for a city"""
@@ -743,9 +747,16 @@ class LandsatSequenceDataset(Dataset):
         if self.cached_data is not None:
             if idx >= len(self.cached_data):
                 raise IndexError(f"Index {idx} out of range for cached data length {len(self.cached_data)}")
-            return self.cached_data[idx]
+            
+            # Get FP16 cached data and convert to appropriate precision for training
+            input_tensor, target_tensor = self.cached_data[idx]
+            if str(self.precision) == "32":
+                input_tensor = input_tensor.to(torch.float32)
+                target_tensor = target_tensor.to(torch.float32)
+            
+            return input_tensor, target_tensor
         
-        # Fallback to disk loading with efficient windowed reads
+        # Fallback to disk loading
         if idx >= len(self.tile_sequences):
             raise IndexError(f"Index {idx} out of range for tile sequences length {len(self.tile_sequences)}")
         
@@ -766,9 +777,9 @@ class LandsatSequenceDataset(Dataset):
             lst_only = normalized_scene[:, :, 1:2]  # LST band only
             output_scenes.append(lst_only)
         
-        # Convert to tensors
-        input_tensor = torch.from_numpy(np.stack(input_scenes, axis=0))
-        target_tensor = torch.from_numpy(np.stack(output_scenes, axis=0))
+        target_dtype = torch.float32 if str(self.precision) == "32" else torch.float16
+        input_tensor = torch.from_numpy(np.stack(input_scenes, axis=0)).to(target_dtype)
+        target_tensor = torch.from_numpy(np.stack(output_scenes, axis=0)).to(target_dtype)
         
         return input_tensor, target_tensor
 
@@ -800,7 +811,8 @@ class LandsatDataModule(pl.LightningDataModule):
         load_to_ram: bool = True,
         interpolated_scenes_file: str = "interpolated.txt",
         tile_size: int = 128,
-        tile_overlap: float = 0.0
+        tile_overlap: float = 0.0,
+        precision: str = "32"
     ):
         super().__init__()
         self.dataset_root = dataset_root
@@ -817,6 +829,7 @@ class LandsatDataModule(pl.LightningDataModule):
         self.interpolated_scenes_file = interpolated_scenes_file
         self.tile_size = tile_size
         self.tile_overlap = tile_overlap
+        self.precision = precision
 
     def setup(self, stage: Optional[str] = None):
         """Setup datasets with fast loading"""
@@ -831,10 +844,10 @@ class LandsatDataModule(pl.LightningDataModule):
                 test_years=self.test_years,
                 debug_monthly_split=self.debug_monthly_split,
                 debug_year=self.debug_year,
-                load_to_ram=self.load_to_ram,
                 interpolated_scenes_file=self.interpolated_scenes_file,
                 tile_size=self.tile_size,
-                tile_overlap=self.tile_overlap
+                tile_overlap=self.tile_overlap,
+                precision=self.precision
             )
             
             self.val_dataset = LandsatSequenceDataset(
@@ -847,13 +860,12 @@ class LandsatDataModule(pl.LightningDataModule):
                 test_years=self.test_years,
                 debug_monthly_split=self.debug_monthly_split,
                 debug_year=self.debug_year,
-                load_to_ram=self.load_to_ram,
                 interpolated_scenes_file=self.interpolated_scenes_file,
                 tile_size=self.tile_size,
-                tile_overlap=self.tile_overlap
+                tile_overlap=self.tile_overlap,
+                precision=self.precision
             )
         
-        if stage == "test" or stage is None:
             self.test_dataset = LandsatSequenceDataset(
                 self.dataset_root,
                 input_sequence_length=self.input_sequence_length,
@@ -864,11 +876,17 @@ class LandsatDataModule(pl.LightningDataModule):
                 test_years=self.test_years,
                 debug_monthly_split=self.debug_monthly_split,
                 debug_year=self.debug_year,
-                load_to_ram=self.load_to_ram,
                 interpolated_scenes_file=self.interpolated_scenes_file,
                 tile_size=self.tile_size,
-                tile_overlap=self.tile_overlap
+                tile_overlap=self.tile_overlap,
+                precision=self.precision
             )
+
+            if self.load_to_ram:
+                print("🔄 Loading train/val datasets to RAM...")
+                self.train_dataset._preload_to_ram()
+                self.val_dataset._preload_to_ram()
+                self.test_dataset._preload_to_ram()
 
     def train_dataloader(self):
         return DataLoader(
