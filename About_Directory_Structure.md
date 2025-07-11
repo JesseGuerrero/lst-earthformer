@@ -8,7 +8,6 @@ ML/
 ├── main.ipynb                   # Main training notebook
 ├── dataset.py                   # Dataset and DataModule classes
 ├── model.py                     # Lightning model implementation
-├── shapes.py                    # Empty file (possibly for geometric operations)
 ├── stac_scrapper.ipynb         # Data collection from STAC catalogs
 │
 ├── Data/                        # Main data directory (gitignored)
@@ -101,3 +100,6 @@ All bands are normalized to [0,1] using predefined ranges:
 - **RGB**: 1-10000 (reflectance × 10000)
 - **Indices**: -10000 to 10000 (NDVI/NDWI/NDBI × 10000)
 - **Albedo**: 1-9980 (albedo × 10000)
+
+### Dataset Size
+124 Cities, minimum 90 square miles each city, 30m spatial resolution, monthly temporal resolution, Landsat data. Each tif is 128x128 pixels from the city satellite scenes at int16.

@@ -400,7 +400,7 @@ class LandsatSequenceDataset(Dataset):
         return True
 
     def _load_tile_from_scene(self, scene_path: str, band_name: str, x_min: int, y_min: int, x_max: int, y_max: int) -> np.ndarray:
-        """Load specific tile region using Repo 1's windowed reading approach"""
+        """Load specific tile region using native int16 from TIF files"""
         scene_dir = Path(scene_path)
         
         if band_name == 'DEM':
@@ -414,32 +414,34 @@ class LandsatSequenceDataset(Dataset):
             window = Window(col_off=x_min, row_off=y_min, width=x_max-x_min, height=y_max-y_min)
             
             with rasterio.open(file_path) as src:
-                tile_data = src.read(1, window=window).astype(np.float32)
+                # Keep native int16 from TIF files
+                tile_data = src.read(1, window=window)  # Keep original dtype (int16)
                 
-                # Handle nodata values
+                # Handle nodata values (keep as int16)
                 if src.nodata is not None:
-                    tile_data[tile_data == src.nodata] = self.nodata_fill_value
+                    tile_data[tile_data == src.nodata] = int(self.nodata_fill_value)
                 
-                # Handle NaN values
-                tile_data = np.nan_to_num(tile_data, nan=self.nodata_fill_value)
+                # Ensure int16 dtype
+                if tile_data.dtype != np.int16:
+                    tile_data = tile_data.astype(np.int16)
                 
                 return tile_data
                 
         except Exception as e:
-            # Return zeros if file doesn't exist or can't be read
-            return np.full((y_max - y_min, x_max - x_min), self.nodata_fill_value, dtype=np.float32)
+            return np.full((y_max - y_min, x_max - x_min), int(self.nodata_fill_value), dtype=np.int16)
 
     def _normalize_scene(self, scene_data: np.ndarray) -> np.ndarray:
-        """Normalize scene data using Repo 1's approach"""
-        normalized_scene = scene_data.copy()
+        """Normalize scene data - convert int16 to normalized float32 for training"""
+        # Convert from int16 to normalized float32 for training
+        normalized_scene = np.zeros(scene_data.shape, dtype=np.float32)
         
         for i, band_name in enumerate(self.band_names):
-            band_data = scene_data[:, :, i]
+            band_data = scene_data[:, :, i].astype(np.float32)  # Convert to float for normalization
             band_range = BAND_RANGES[band_name]
             
             # Normalize to [0, 1], keeping NODATA as 0
             valid_mask = band_data != self.nodata_fill_value
-            normalized_band = np.full_like(band_data, self.nodata_fill_value, dtype=np.float32)
+            normalized_band = np.full_like(band_data, 0.0, dtype=np.float32)  # Use 0.0 for nodata in normalized space
             normalized_band[valid_mask] = (band_data[valid_mask] - band_range["min"]) / (band_range["max"] - band_range["min"])
             normalized_band = np.clip(normalized_band, 0, 1)
             
@@ -448,7 +450,7 @@ class LandsatSequenceDataset(Dataset):
         return normalized_scene
 
     def _preload_to_ram(self):
-        """Preload all tile sequences to RAM using multiprocessing"""
+        """Preload all tile sequences to RAM using multiprocessing with native int16"""
         num_cpu = min(cpu_count(), len(self.tile_sequences))
         print(f"🔄 Preloading {len(self.tile_sequences)} tile sequences to RAM with {num_cpu} cores...")
         
@@ -464,18 +466,19 @@ class LandsatSequenceDataset(Dataset):
             results = list(tqdm(
                 pool.imap(load_func, self.tile_sequences, chunksize=10),
                 total=len(self.tile_sequences),
-                desc=f"Loading {self.split} data to RAM"
+                desc=f"Loading {self.split} data to RAM (INT16→FP32)"
             ))
         
-        # FIXED: Keep valid indices and filter both sequences and results together
+        # Keep valid indices and filter both sequences and results together
         valid_sequences = []
         valid_cached_data = []
         
         for i, result in enumerate(results):
             if result is not None:
                 input_data, target_data = result
-                input_tensor = torch.from_numpy(np.stack(input_data, axis=0))
-                target_tensor = torch.from_numpy(np.stack(target_data, axis=0))
+                # Data is converted to float32 for training after normalization
+                input_tensor = torch.from_numpy(np.stack(input_data, axis=0)).to(torch.float32)
+                target_tensor = torch.from_numpy(np.stack(target_data, axis=0)).to(torch.float32)
                 
                 valid_sequences.append(self.tile_sequences[i])
                 valid_cached_data.append((input_tensor, target_tensor))
@@ -484,11 +487,11 @@ class LandsatSequenceDataset(Dataset):
         self.tile_sequences = valid_sequences
         self.cached_data = valid_cached_data
         
-        print(f"✅ Cached {len(self.cached_data)} sequences in RAM ({len(results) - len(self.cached_data)} failed)")
-
+        print(f"✅ Cached {len(self.cached_data)} sequences in RAM as INT16→FP32 ({len(results) - len(self.cached_data)} failed)")
+    
     @staticmethod
     def _load_sequence_static(sequence_info, dataset_root, band_names, input_length, output_length, nodata_value):
-        """Static method for parallel loading"""
+        """Static method for parallel loading using native int16"""
         city, x_min, y_min, x_max, y_max, input_months, output_months = sequence_info
         dataset_root = Path(dataset_root)
         
@@ -496,25 +499,25 @@ class LandsatSequenceDataset(Dataset):
             # Load input sequence
             input_scenes = []
             for month in input_months:
-                scene_data = FastLandsatSequenceDataset._load_scene_tile_static(
+                scene_data = LandsatSequenceDataset._load_scene_tile_static(
                     dataset_root, city, month, x_min, y_min, x_max, y_max, band_names, nodata_value
                 )
                 if scene_data is None:
                     return None
                 
-                normalized_scene = FastLandsatSequenceDataset._normalize_scene_static(scene_data, band_names, nodata_value)
+                normalized_scene = LandsatSequenceDataset._normalize_scene_static(scene_data, band_names, nodata_value)
                 input_scenes.append(normalized_scene)
             
             # Load output sequence (LST only)
             output_scenes = []
             for month in output_months:
-                scene_data = FastLandsatSequenceDataset._load_scene_tile_static(
+                scene_data = LandsatSequenceDataset._load_scene_tile_static(
                     dataset_root, city, month, x_min, y_min, x_max, y_max, band_names, nodata_value
                 )
                 if scene_data is None:
                     return None
                 
-                normalized_scene = FastLandsatSequenceDataset._normalize_scene_static(scene_data, band_names, nodata_value)
+                normalized_scene = LandsatSequenceDataset._normalize_scene_static(scene_data, band_names, nodata_value)
                 lst_only = normalized_scene[:, :, 1:2]  # LST band only
                 output_scenes.append(lst_only)
             
@@ -525,7 +528,7 @@ class LandsatSequenceDataset(Dataset):
 
     @staticmethod
     def _load_scene_tile_static(dataset_root, city, month, x_min, y_min, x_max, y_max, band_names, nodata_value):
-        """Static method to load a single scene tile"""
+        """Static method to load a single scene tile using native int16"""
         try:
             # Get scene path
             city_dir = dataset_root / "Dataset" / "Cities_Processed" / city
@@ -561,14 +564,17 @@ class LandsatSequenceDataset(Dataset):
                 try:
                     window = Window(col_off=x_min, row_off=y_min, width=x_max-x_min, height=y_max-y_min)
                     with rasterio.open(file_path) as src:
-                        band_data = src.read(1, window=window).astype(np.float32)
+                        # Keep native int16
+                        band_data = src.read(1, window=window)  # Keep original dtype
                         if src.nodata is not None:
-                            band_data[band_data == src.nodata] = nodata_value
-                        band_data = np.nan_to_num(band_data, nan=nodata_value)
+                            band_data[band_data == src.nodata] = int(nodata_value)
+                        if band_data.dtype != np.int16:
+                            band_data = band_data.astype(np.int16)
+                        
                         bands.append(band_data)
                 except:
                     # Create fallback data if file doesn't exist
-                    fallback_data = np.full((y_max - y_min, x_max - x_min), nodata_value, dtype=np.float32)
+                    fallback_data = np.full((y_max - y_min, x_max - x_min), int(nodata_value), dtype=np.int16)
                     bands.append(fallback_data)
             
             return np.stack(bands, axis=-1)
@@ -578,15 +584,16 @@ class LandsatSequenceDataset(Dataset):
 
     @staticmethod
     def _normalize_scene_static(scene_data, band_names, nodata_value):
-        """Static normalization method"""
-        normalized_scene = scene_data.copy()
+        """Static normalization method - convert int16 to normalized float32"""
+        # Convert from int16 to normalized float32
+        normalized_scene = np.zeros(scene_data.shape, dtype=np.float32)
         
         for i, band_name in enumerate(band_names):
-            band_data = scene_data[:, :, i]
+            band_data = scene_data[:, :, i].astype(np.float32)  # Convert to float for normalization
             band_range = BAND_RANGES[band_name]
             
             valid_mask = band_data != nodata_value
-            normalized_band = np.full_like(band_data, nodata_value, dtype=np.float32)
+            normalized_band = np.full_like(band_data, 0.0, dtype=np.float32)  # Use 0.0 for nodata in normalized space
             normalized_band[valid_mask] = (band_data[valid_mask] - band_range["min"]) / (band_range["max"] - band_range["min"])
             normalized_band = np.clip(normalized_band, 0, 1)
             
