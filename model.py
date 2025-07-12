@@ -50,21 +50,21 @@ class LandsatLSTPredictor(pl.LightningModule):
                 'enc_cuboid_size': [(2, 4, 4), (2, 4, 4)],
                 'num_global_vectors': 8,
             },
-            "medium": {
-                'base_units': 128,
-                'num_heads': 8,
-                'enc_depth': [3, 3],
-                'dec_depth': [2, 2],
-                'enc_cuboid_size': [(2, 4, 4), (2, 8, 8)],
-                'num_global_vectors': 16,
+                "medium": {
+                'base_units': 128,      # Keep same
+                'num_heads': 8,         # Keep same  
+                'enc_depth': [2, 2],    # REDUCED from [3, 3] 
+                'dec_depth': [1, 1],    # REDUCED from [2, 2]
+                'enc_cuboid_size': [(2, 4, 4), (2, 4, 4)],  # REDUCED from [(2, 4, 4), (2, 8, 8)]
+                'num_global_vectors': 12,  # REDUCED from 16
             },
             "large": {
-                'base_units': 192,
-                'num_heads': 12,
-                'enc_depth': [4, 4],
-                'dec_depth': [3, 3],
-                'enc_cuboid_size': [(2, 8, 8), (2, 8, 8)],
-                'num_global_vectors': 32,
+                'base_units': 144,      # REDUCED from 192
+                'num_heads': 8,         # REDUCED from 12 (must divide base_units)
+                'enc_depth': [2, 2],    # REDUCED from [4, 4]  
+                'dec_depth': [1, 1],    # REDUCED from [3, 3]
+                'enc_cuboid_size': [(2, 4, 4), (2, 4, 4)],  # REDUCED from [(2, 8, 8), (2, 8, 8)]
+                'num_global_vectors': 16,  # REDUCED from 32
             }
         }
         
