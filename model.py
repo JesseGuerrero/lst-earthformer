@@ -262,11 +262,12 @@ class LandsatLSTPredictor(pl.LightningModule):
         return loss
     
     def log_simple_sequence_visualization(self, inputs: torch.Tensor, targets: torch.Tensor, 
-                                predictions: torch.Tensor, stage: str = "val", 
-                                batch_idx: int = 0, max_samples: int = 2):
+                            predictions: torch.Tensor, stage: str = "val", 
+                            batch_idx: int = 0, max_samples: int = 2):
         """
         Create a simple visualization showing input sequences, target sequences, and predictions
         All images will show LST temperature data in Fahrenheit with per-image scaling
+        NODATA pixels (0 before normalization) are made transparent
         """
         if not isinstance(self.logger, pl.loggers.WandbLogger):
             return
@@ -276,10 +277,7 @@ class LandsatLSTPredictor(pl.LightningModule):
         targets = targets.float().cpu()
         predictions = predictions.float().cpu()
         
-        try:
-            import matplotlib.pyplot as plt
-            import numpy as np
-            
+        try:            
             # Only log every N epochs during training/validation
             if stage in ["train", "val"] and self.current_epoch % self.log_images_every_n_epochs != 0:
                 return
@@ -308,63 +306,120 @@ class LandsatLSTPredictor(pl.LightningModule):
                 if max_timesteps == 1:
                     axes = axes.reshape(3, 1)
                 
+                # Set background color for better contrast with transparent pixels
+                fig.patch.set_facecolor('lightgray')
+                
                 # Row 0: Input sequences (show LST band - index 1)
                 for t in range(input_len):
                     ax = axes[0, t]
+                    ax.set_facecolor('lightgray')  # Set axes background
+                    
                     lst_input = input_seq[t, :, :, 1]  # LST is band index 1
                     # Denormalize from [0,1] back to Fahrenheit
                     lst_input_fahrenheit = lst_input * (211.0 - (-189.0)) + (-189.0)
                     
-                    # Use actual min/max of this specific image for better color contrast
-                    vmin_input = lst_input_fahrenheit.min()
-                    vmax_input = lst_input_fahrenheit.max()
-                    im = ax.imshow(lst_input_fahrenheit, cmap='RdYlBu_r', vmin=vmin_input, vmax=vmax_input)
-                    ax.set_title(f'Input T={t+1}\n({vmin_input:.1f}°F - {vmax_input:.1f}°F)', fontsize=10)
+                    # Create mask for NODATA pixels (originally 0 before normalization)
+                    # In normalized space, NODATA (0) becomes -189°F after denormalization
+                    nodata_mask = np.abs(lst_input_fahrenheit - (-189.0)) < 0.1  # Small tolerance
+                    
+                    # Create masked array for transparency
+                    lst_masked = np.ma.masked_where(nodata_mask, lst_input_fahrenheit)
+                    
+                    # Use actual min/max of valid data for better color contrast
+                    if not lst_masked.mask.all():  # Check if we have valid data
+                        vmin_input = lst_masked.min()
+                        vmax_input = lst_masked.max()
+                        im = ax.imshow(lst_masked, cmap='RdYlBu_r', vmin=vmin_input, vmax=vmax_input, alpha=0.9)
+                        ax.set_title(f'Input T={t+1}\n({vmin_input:.1f}°F - {vmax_input:.1f}°F)', fontsize=10)
+                    else:
+                        # All data is NODATA
+                        ax.imshow(np.zeros_like(lst_input_fahrenheit), cmap='RdYlBu_r', alpha=0)
+                        ax.set_title(f'Input T={t+1}\n(No Valid Data)', fontsize=10)
+                        im = None
+                    
                     ax.axis('off')
-                    plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
+                    if im is not None:
+                        plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
                 
                 # Fill remaining input columns if needed
                 for t in range(input_len, max_timesteps):
+                    axes[0, t].set_facecolor('lightgray')
                     axes[0, t].axis('off')
                     axes[0, t].text(0.5, 0.5, 'N/A', ha='center', va='center', transform=axes[0, t].transAxes)
                 
                 # Row 1: Target sequences (LST only)
                 for t in range(output_len):
                     ax = axes[1, t]
+                    ax.set_facecolor('lightgray')  # Set axes background
+                    
                     lst_target = target_seq[t, :, :, 0]  # LST target (only channel)
                     # Denormalize from [0,1] back to Fahrenheit
                     lst_target_fahrenheit = lst_target * (211.0 - (-189.0)) + (-189.0)
                     
-                    # Use actual min/max of this specific image for better color contrast
-                    vmin_target = lst_target_fahrenheit.min()
-                    vmax_target = lst_target_fahrenheit.max()
-                    im = ax.imshow(lst_target_fahrenheit, cmap='RdYlBu_r', vmin=vmin_target, vmax=vmax_target)
-                    ax.set_title(f'Target T={input_len+t+1}\n({vmin_target:.1f}°F - {vmax_target:.1f}°F)', fontsize=10)
+                    # Create mask for NODATA pixels
+                    nodata_mask = np.abs(lst_target_fahrenheit - (-189.0)) < 0.1
+                    
+                    # Create masked array for transparency
+                    lst_masked = np.ma.masked_where(nodata_mask, lst_target_fahrenheit)
+                    
+                    # Use actual min/max of valid data for better color contrast
+                    if not lst_masked.mask.all():  # Check if we have valid data
+                        vmin_target = lst_masked.min()
+                        vmax_target = lst_masked.max()
+                        im = ax.imshow(lst_masked, cmap='RdYlBu_r', vmin=vmin_target, vmax=vmax_target, alpha=0.9)
+                        ax.set_title(f'Target T={input_len+t+1}\n({vmin_target:.1f}°F - {vmax_target:.1f}°F)', fontsize=10)
+                    else:
+                        # All data is NODATA
+                        ax.imshow(np.zeros_like(lst_target_fahrenheit), cmap='RdYlBu_r', alpha=0)
+                        ax.set_title(f'Target T={input_len+t+1}\n(No Valid Data)', fontsize=10)
+                        im = None
+                    
                     ax.axis('off')
-                    plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
+                    if im is not None:
+                        plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
                 
                 # Fill remaining target columns if needed
                 for t in range(output_len, max_timesteps):
+                    axes[1, t].set_facecolor('lightgray')
                     axes[1, t].axis('off')
                     axes[1, t].text(0.5, 0.5, 'N/A', ha='center', va='center', transform=axes[1, t].transAxes)
                 
                 # Row 2: Prediction sequences (LST only)
                 for t in range(output_len):
                     ax = axes[2, t]
+                    ax.set_facecolor('lightgray')  # Set axes background
+                    
                     lst_pred = pred_seq[t, :, :, 0]  # LST prediction (only channel)
                     # Denormalize from [0,1] back to Fahrenheit
                     lst_pred_fahrenheit = lst_pred * (211.0 - (-189.0)) + (-189.0)
                     
-                    # Use actual min/max of this specific image for better color contrast
-                    vmin_pred = lst_pred_fahrenheit.min()
-                    vmax_pred = lst_pred_fahrenheit.max()
-                    im = ax.imshow(lst_pred_fahrenheit, cmap='RdYlBu_r', vmin=vmin_pred, vmax=vmax_pred)
-                    ax.set_title(f'Prediction T={input_len+t+1}\n({vmin_pred:.1f}°F - {vmax_pred:.1f}°F)', fontsize=10)
+                    # For predictions, we might want to mask based on the target's valid pixels
+                    # or use the same NODATA threshold
+                    target_lst = target_seq[t, :, :, 0] * (211.0 - (-189.0)) + (-189.0)
+                    nodata_mask = np.abs(target_lst - (-189.0)) < 0.1
+                    
+                    # Create masked array for transparency
+                    lst_masked = np.ma.masked_where(nodata_mask, lst_pred_fahrenheit)
+                    
+                    # Use actual min/max of valid data for better color contrast
+                    if not lst_masked.mask.all():  # Check if we have valid data
+                        vmin_pred = lst_masked.min()
+                        vmax_pred = lst_masked.max()
+                        im = ax.imshow(lst_masked, cmap='RdYlBu_r', vmin=vmin_pred, vmax=vmax_pred, alpha=0.9)
+                        ax.set_title(f'Prediction T={input_len+t+1}\n({vmin_pred:.1f}°F - {vmax_pred:.1f}°F)', fontsize=10)
+                    else:
+                        # All data is NODATA
+                        ax.imshow(np.zeros_like(lst_pred_fahrenheit), cmap='RdYlBu_r', alpha=0)
+                        ax.set_title(f'Prediction T={input_len+t+1}\n(No Valid Data)', fontsize=10)
+                        im = None
+                    
                     ax.axis('off')
-                    plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
+                    if im is not None:
+                        plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
                 
                 # Fill remaining prediction columns if needed
                 for t in range(output_len, max_timesteps):
+                    axes[2, t].set_facecolor('lightgray')
                     axes[2, t].axis('off')
                     axes[2, t].text(0.5, 0.5, 'N/A', ha='center', va='center', transform=axes[2, t].transAxes)
                 
@@ -383,6 +438,7 @@ class LandsatLSTPredictor(pl.LightningModule):
                     if "input_date_range" in metadata_info:
                         title_parts.append(f'Dates: {metadata_info["input_date_range"]} → {metadata_info["output_date_range"]}')
                 title_parts.append(f'Input Length: {input_len}, Output Length: {output_len}')
+                title_parts.append('Gray areas = NODATA pixels (transparent)')
                 
                 plt.suptitle('\n'.join(title_parts), fontsize=12)
                 plt.tight_layout()
