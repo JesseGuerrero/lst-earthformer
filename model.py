@@ -262,18 +262,11 @@ class LandsatLSTPredictor(pl.LightningModule):
         return loss
     
     def log_simple_sequence_visualization(self, inputs: torch.Tensor, targets: torch.Tensor, 
-                                    predictions: torch.Tensor, stage: str = "val", 
-                                    batch_idx: int = 0, max_samples: int = 2):
+                                predictions: torch.Tensor, stage: str = "val", 
+                                batch_idx: int = 0, max_samples: int = 2):
         """
         Create a simple visualization showing input sequences, target sequences, and predictions
-        
-        Args:
-            inputs: Input tensor [batch, time, height, width, channels]
-            targets: Target tensor [batch, time, height, width, 1] (LST only)
-            predictions: Prediction tensor [batch, time, height, width, 1] (LST only)
-            stage: Training stage ("train", "val", "test")
-            batch_idx: Current batch index
-            max_samples: Maximum number of samples to visualize from batch
+        All images will show LST temperature data in Fahrenheit with per-image scaling
         """
         if not isinstance(self.logger, pl.loggers.WandbLogger):
             return
@@ -304,6 +297,9 @@ class LandsatLSTPredictor(pl.LightningModule):
                 input_len = input_seq.shape[0]
                 output_len = target_seq.shape[0]
                 
+                # Get metadata for this sample
+                metadata_info = self._get_sample_metadata(batch_idx, sample_idx)
+                
                 # Create figure: 3 rows x max timesteps columns
                 max_timesteps = max(input_len, output_len)
                 fig, axes = plt.subplots(3, max_timesteps, figsize=(4*max_timesteps, 12))
@@ -318,6 +314,7 @@ class LandsatLSTPredictor(pl.LightningModule):
                     lst_input = input_seq[t, :, :, 1]  # LST is band index 1
                     # Denormalize from [0,1] back to Fahrenheit
                     lst_input_fahrenheit = lst_input * (211.0 - (-189.0)) + (-189.0)
+                    
                     # Use actual min/max of this specific image for better color contrast
                     vmin_input = lst_input_fahrenheit.min()
                     vmax_input = lst_input_fahrenheit.max()
@@ -331,12 +328,13 @@ class LandsatLSTPredictor(pl.LightningModule):
                     axes[0, t].axis('off')
                     axes[0, t].text(0.5, 0.5, 'N/A', ha='center', va='center', transform=axes[0, t].transAxes)
                 
-                # Row 1: Target sequences
+                # Row 1: Target sequences (LST only)
                 for t in range(output_len):
                     ax = axes[1, t]
-                    lst_target = target_seq[t, :, :, 0]  # LST target
+                    lst_target = target_seq[t, :, :, 0]  # LST target (only channel)
                     # Denormalize from [0,1] back to Fahrenheit
                     lst_target_fahrenheit = lst_target * (211.0 - (-189.0)) + (-189.0)
+                    
                     # Use actual min/max of this specific image for better color contrast
                     vmin_target = lst_target_fahrenheit.min()
                     vmax_target = lst_target_fahrenheit.max()
@@ -350,12 +348,13 @@ class LandsatLSTPredictor(pl.LightningModule):
                     axes[1, t].axis('off')
                     axes[1, t].text(0.5, 0.5, 'N/A', ha='center', va='center', transform=axes[1, t].transAxes)
                 
-                # Row 2: Prediction sequences
+                # Row 2: Prediction sequences (LST only)
                 for t in range(output_len):
                     ax = axes[2, t]
-                    lst_pred = pred_seq[t, :, :, 0]  # LST prediction
+                    lst_pred = pred_seq[t, :, :, 0]  # LST prediction (only channel)
                     # Denormalize from [0,1] back to Fahrenheit
                     lst_pred_fahrenheit = lst_pred * (211.0 - (-189.0)) + (-189.0)
+                    
                     # Use actual min/max of this specific image for better color contrast
                     vmin_pred = lst_pred_fahrenheit.min()
                     vmax_pred = lst_pred_fahrenheit.max()
@@ -369,27 +368,78 @@ class LandsatLSTPredictor(pl.LightningModule):
                     axes[2, t].axis('off')
                     axes[2, t].text(0.5, 0.5, 'N/A', ha='center', va='center', transform=axes[2, t].transAxes)
                 
-                # Add row labels (which will appear as sections in WandB)
-                axes[0, 0].text(-0.2, 0.5, 'INPUT SEQUENCE', rotation=90, ha='center', va='center',
+                # Add row labels
+                axes[0, 0].text(-0.2, 0.5, 'INPUT LST', rotation=90, ha='center', va='center',
                             transform=axes[0, 0].transAxes, fontsize=12, fontweight='bold')
-                axes[1, 0].text(-0.2, 0.5, 'TARGET SEQUENCE', rotation=90, ha='center', va='center',
+                axes[1, 0].text(-0.2, 0.5, 'TARGET LST', rotation=90, ha='center', va='center',
                             transform=axes[1, 0].transAxes, fontsize=12, fontweight='bold')
-                axes[2, 0].text(-0.2, 0.5, 'PREDICTION SEQUENCE', rotation=90, ha='center', va='center',
+                axes[2, 0].text(-0.2, 0.5, 'PREDICTED LST', rotation=90, ha='center', va='center',
                             transform=axes[2, 0].transAxes, fontsize=12, fontweight='bold')
                 
-                plt.suptitle(f'{stage.upper()} - Batch {batch_idx}, Sample {sample_idx+1}\n'
-                            f'Input Length: {input_len}, Output Length: {output_len}', fontsize=14)
+                # Create title with metadata
+                title_parts = [f'{stage.upper()} - Batch {batch_idx}, Sample {sample_idx+1}']
+                if metadata_info:
+                    title_parts.append(f'City: {metadata_info["city"]}, Tile: {metadata_info["tile_position"]}')
+                    if "input_date_range" in metadata_info:
+                        title_parts.append(f'Dates: {metadata_info["input_date_range"]} → {metadata_info["output_date_range"]}')
+                title_parts.append(f'Input Length: {input_len}, Output Length: {output_len}')
+                
+                plt.suptitle('\n'.join(title_parts), fontsize=12)
                 plt.tight_layout()
                 
                 # Log to wandb
                 self.logger.experiment.log({
-                    f"{stage}_sequence_visualization_batch{batch_idx}_sample{sample_idx}": wandb.Image(fig)
+                    f"{stage}_lst_sequence_batch{batch_idx}_sample{sample_idx}": wandb.Image(fig)
                 })
                 
                 plt.close(fig)
                 
         except Exception as e:
-            print(f"Warning: Failed to create sequence visualization: {e}")
+            print(f"Warning: Failed to create LST temperature visualization: {e}")
+
+    def _get_sample_metadata(self, batch_idx: int, sample_idx: int) -> dict:
+        """Get metadata for a specific sample in the batch"""
+        try:
+            if hasattr(self.trainer, 'datamodule') and hasattr(self.trainer.datamodule, 'train_dataset'):
+                # Determine which dataset to use based on current stage
+                if hasattr(self.trainer, 'state') and hasattr(self.trainer.state, 'stage'):
+                    if self.trainer.state.stage.name == 'VALIDATING':
+                        dataset = self.trainer.datamodule.val_dataset
+                    elif self.trainer.state.stage.name == 'TESTING':
+                        dataset = getattr(self.trainer.datamodule, 'test_dataset', None)
+                    else:
+                        dataset = self.trainer.datamodule.train_dataset
+                else:
+                    # Fallback to train dataset
+                    dataset = self.trainer.datamodule.train_dataset
+                
+                if dataset is None:
+                    return {}
+                
+                # Calculate actual sample index from batch info
+                batch_size = self.trainer.datamodule.batch_size
+                actual_sample_idx = batch_idx * batch_size + sample_idx
+                
+                # Get the tile sequence info from dataset
+                if hasattr(dataset, 'tile_sequences') and actual_sample_idx < len(dataset.tile_sequences):
+                    city, tile_row, tile_col, input_months, output_months = dataset.tile_sequences[actual_sample_idx]
+                    
+                    return {
+                        'city': city,
+                        'tile_position': f"row_{tile_row:03d}_col_{tile_col:03d}",
+                        'tile_row': tile_row,
+                        'tile_col': tile_col,
+                        'input_months': input_months,
+                        'output_months': output_months,
+                        'input_date_range': f"{input_months[0]} to {input_months[-1]}",
+                        'output_date_range': f"{output_months[0]} to {output_months[-1]}"
+                    }
+            
+            return {}
+            
+        except Exception as e:
+            print(f"Warning: Could not get sample metadata: {e}")
+            return {}
 
 
     def on_validation_epoch_end(self):
