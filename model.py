@@ -187,7 +187,7 @@ class LandsatLSTPredictor(pl.LightningModule):
         return monthly_scenes
     
     def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
-        """Training step with enhanced image logging"""
+        """Training step with Fahrenheit temperature metrics"""
         inputs, targets = batch
         
         # Forward pass
@@ -200,64 +200,57 @@ class LandsatLSTPredictor(pl.LightningModule):
         mae = torch.nn.functional.l1_loss(predictions, targets)
         
         # Log metrics
-        self.log('train_loss', torch.sqrt(loss), on_step=True, on_epoch=True, prog_bar=True)
-        self.log('train_mae', mae, on_step=True, on_epoch=True)
+        self.log('train_loss', torch.sqrt(loss), on_step=False, on_epoch=True)
+        self.log('train_mae', mae, on_step=False, on_epoch=True)
         
-        # Calculate temperature-specific metrics
+        # Calculate temperature-specific metrics in Fahrenheit
         with torch.no_grad():
-            pred_temp = predictions.detach()
-            true_temp = targets.detach()
+            # Denormalize to Fahrenheit: value * (max - min) + min
+            pred_fahrenheit = predictions.detach() * (211.0 - (-189.0)) + (-189.0)
+            true_fahrenheit = targets.detach() * (211.0 - (-189.0)) + (-189.0)
             
-            temp_mae = torch.nn.functional.l1_loss(pred_temp, true_temp)
-            temp_rmse = torch.sqrt(torch.nn.functional.mse_loss(pred_temp, true_temp))
+            temp_mae_f = torch.nn.functional.l1_loss(pred_fahrenheit, true_fahrenheit)
+            temp_rmse_f = torch.sqrt(torch.nn.functional.mse_loss(pred_fahrenheit, true_fahrenheit))
             
-            self.log('train_temp_mae_scaled', temp_mae, on_step=False, on_epoch=True)
-            self.log('train_temp_rmse_scaled', temp_rmse, on_step=False, on_epoch=True)
+            self.log('train_temp_mae_fahrenheit', temp_mae_f, on_step=False, on_epoch=True, prog_bar=True)
+            self.log('train_temp_rmse_fahrenheit', temp_rmse_f, on_step=False, on_epoch=True, prog_bar=True)
         
         return loss
-    
-    def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
-        """Validation step with enhanced image logging"""
-        inputs, targets = batch
         
-        # Forward pass
+    def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
+        """Validation step with temperature metrics in Fahrenheit"""
+        inputs, targets = batch
         predictions = self.forward(inputs)
         
-        # Calculate loss
+        # Calculate loss in normalized space
         loss = self.criterion(predictions, targets)
-        
-        # Calculate metrics
         mae = torch.nn.functional.l1_loss(predictions, targets)
         
-        # Log metrics
-        self.log('val_loss', torch.sqrt(loss), on_step=False, on_epoch=True, prog_bar=True)
+        # Log normalized metrics
+        self.log('val_loss', torch.sqrt(loss), on_step=False, on_epoch=True)
         self.log('val_mae', mae, on_step=False, on_epoch=True)
         
-        # Temperature-specific metrics
+        # NEW: Calculate metrics in Fahrenheit
         with torch.no_grad():
-            pred_temp = predictions.detach()
-            true_temp = targets.detach()
+            # Denormalize to Fahrenheit: value * (max - min) + min
+            pred_fahrenheit = predictions.detach() * (211.0 - (-189.0)) + (-189.0)
+            true_fahrenheit = targets.detach() * (211.0 - (-189.0)) + (-189.0)
             
-            temp_mae = torch.nn.functional.l1_loss(pred_temp, true_temp)
-            temp_rmse = torch.sqrt(torch.nn.functional.mse_loss(pred_temp, true_temp))
+            temp_mae_f = torch.nn.functional.l1_loss(pred_fahrenheit, true_fahrenheit)
+            temp_rmse_f = torch.sqrt(torch.nn.functional.mse_loss(pred_fahrenheit, true_fahrenheit))
             
-            # Calculate correlation coefficient
-            pred_flat = pred_temp.flatten()
-            true_flat = true_temp.flatten()
+            # Log ACTUAL temperature metrics
+            self.log('val_temp_mae_fahrenheit', temp_mae_f, on_step=False, on_epoch=True, prog_bar=True)
+            self.log('val_temp_rmse_fahrenheit', temp_rmse_f, on_step=False, on_epoch=True, prog_bar=True)
             
-            # Remove any NaN or extreme values
+            # Correlation (same in both spaces)
+            pred_flat = pred_fahrenheit.flatten()
+            true_flat = true_fahrenheit.flatten()
             mask = torch.isfinite(pred_flat) & torch.isfinite(true_flat)
-            if mask.sum() > 0:
-                pred_clean = pred_flat[mask]
-                true_clean = true_flat[mask]
-                
-                if len(pred_clean) > 1:  # Need at least 2 points for correlation
-                    correlation = torch.corrcoef(torch.stack([pred_clean, true_clean]))[0, 1]
-                    if torch.isfinite(correlation):
-                        self.log('val_correlation', correlation, on_step=False, on_epoch=True)
-            
-            self.log('val_temp_mae_scaled', temp_mae, on_step=False, on_epoch=True)
-            self.log('val_temp_rmse_scaled', temp_rmse, on_step=False, on_epoch=True)
+            if mask.sum() > 1:
+                correlation = torch.corrcoef(torch.stack([pred_flat[mask], true_flat[mask]]))[0, 1]
+                if torch.isfinite(correlation):
+                    self.log('val_correlation', correlation, on_step=False, on_epoch=True)
         
         return loss
     

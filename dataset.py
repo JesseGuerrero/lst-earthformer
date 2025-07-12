@@ -285,7 +285,7 @@ class LandsatSequenceDataset(Dataset):
         return normalized_scene
     
     def _process_single_city(self, city: str) -> List[Tuple[str, int, int, List[str], List[str]]]:
-        """Process a single city and return its sequences, filtering out those with interpolated ground truth"""
+        """Process a single city and return its sequences, filtering out those with interpolated ground truth or NODATA in outputs"""
         city_sequences = []
         
         available_tiles = self._get_available_tiles(city)
@@ -304,7 +304,7 @@ class LandsatSequenceDataset(Dataset):
                 if self._are_consecutive_months(input_months + output_months):
                     if self._verify_tile_sequence_exists(city, tile_row, tile_col, input_months + output_months):
                         
-                        # NEW: Check if any output scenes are interpolated
+                        # Check if any output scenes are interpolated
                         has_interpolated_output = False
                         for month in output_months:
                             scene_path = monthly_scenes[month]
@@ -315,13 +315,40 @@ class LandsatSequenceDataset(Dataset):
                                 has_interpolated_output = True
                                 break
                         
-                        # Only include sequence if NO output scenes are interpolated
-                        if not has_interpolated_output:
+                        # NEW: Check if any output scenes have NODATA in LST
+                        has_nodata_output = False
+                        if not has_interpolated_output:  # Only check if not already filtered out
+                            for month in output_months:
+                                if self._has_nodata_in_lst_tile(city, month, tile_row, tile_col, monthly_scenes):
+                                    has_nodata_output = True
+                                    break
+                        
+                        # Only include sequence if NO output scenes are interpolated AND NO output scenes have NODATA
+                        if not has_interpolated_output and not has_nodata_output:
                             city_sequences.append((city, tile_row, tile_col, input_months, output_months))
-                        # Note: Input scenes can be interpolated - we only exclude from ground truth
         
         return city_sequences
 
+    def _has_nodata_in_lst_tile(self, city: str, month: str, tile_row: int, tile_col: int, monthly_scenes: Dict[str, str]) -> bool:
+        """Check if LST tile contains any NODATA pixels (value 0)"""
+        try:
+            scene_dir = Path(monthly_scenes[month])
+            lst_tile_path = scene_dir / f"LST_row_{tile_row:03d}_col_{tile_col:03d}.tif"
+            
+            if not lst_tile_path.exists():
+                return True  # Missing file counts as having NODATA
+            
+            with rasterio.open(lst_tile_path) as src:
+                lst_data = src.read(1)
+                # Check for any NODATA pixels (value 0 or actual nodata value)
+                nodata_value = src.nodata if src.nodata is not None else 0
+                has_nodata = np.any((lst_data == 0) | (lst_data == nodata_value))
+                return has_nodata
+            
+        except Exception as e:
+            print(f"Warning: Error checking NODATA for {city} {month} tile({tile_row},{tile_col}): {e}")
+            return True  # Treat errors as having NODATA to be safe
+        
     def _setup_debug_monthly_splits(self):
         """Setup debug monthly splits within a single year"""
         train_months = [1, 2, 3, 4, 5, 6, 7, 8]
