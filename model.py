@@ -16,8 +16,9 @@ class LandsatLSTPredictor(pl.LightningModule):
         max_epochs: int = 100,
         log_images_every_n_epochs: int = 5,
         max_images_to_log: int = 4,
-        input_sequence_length: int = 3,     # New parameter
-        output_sequence_length: int = 3,    # New parameter
+        input_sequence_length: int = 3,
+        output_sequence_length: int = 3,
+        model_size: str = "small",  # NEW: "tiny", "small", "medium", "large"
         **model_kwargs
     ):
         super().__init__()
@@ -31,36 +32,69 @@ class LandsatLSTPredictor(pl.LightningModule):
         self.log_images_every_n_epochs = log_images_every_n_epochs
         self.max_images_to_log = max_images_to_log
         
-        # Store metadata for each batch during training
-        self.current_batch_metadata = {}
+        # Model size configurations
+        model_configs = {
+            "tiny": {
+                'base_units': 64,
+                'num_heads': 4,
+                'enc_depth': [1, 1],
+                'dec_depth': [1, 1],
+                'enc_cuboid_size': [(2, 4, 4), (2, 4, 4)],
+                'num_global_vectors': 4,
+            },
+            "small": {
+                'base_units': 96,
+                'num_heads': 6,
+                'enc_depth': [2, 2],
+                'dec_depth': [1, 1],
+                'enc_cuboid_size': [(2, 4, 4), (2, 4, 4)],
+                'num_global_vectors': 8,
+            },
+            "medium": {
+                'base_units': 128,
+                'num_heads': 8,
+                'enc_depth': [3, 3],
+                'dec_depth': [2, 2],
+                'enc_cuboid_size': [(2, 4, 4), (2, 8, 8)],
+                'num_global_vectors': 16,
+            },
+            "large": {
+                'base_units': 192,
+                'num_heads': 12,
+                'enc_depth': [4, 4],
+                'dec_depth': [3, 3],
+                'enc_cuboid_size': [(2, 8, 8), (2, 8, 8)],
+                'num_global_vectors': 32,
+            }
+        }
         
-        # Default Landsat-optimized config
+        # Get base config for selected model size
+        selected_config = model_configs.get(model_size, model_configs["small"])
+        
+        # Default Landsat-optimized config (shared across all sizes)
         self.model_config = {
-            'input_shape': (input_sequence_length, 128, 128, 9),  # input_sequence timesteps, 128x128, 9 bands
-            'target_shape': (output_sequence_length, 128, 128, 1), # output_sequence timesteps, LST only
-            'base_units': 96,
-            'num_heads': 6,
-            'enc_depth': [2, 2],
-            'dec_depth': [1, 1],
+            'input_shape': (input_sequence_length, 128, 128, 9),
+            'target_shape': (output_sequence_length, 128, 128, 1),
             'attn_drop': 0.1,
             'proj_drop': 0.1,
             'ffn_drop': 0.1,
-            'num_global_vectors': 8,
             'use_dec_self_global': True,
             'use_dec_cross_global': True,
             'pos_embed_type': 't+hw',
             'use_relative_pos': True,
             'ffn_activation': 'gelu',
-            'enc_cuboid_size': [(2, 4, 4), (2, 4, 4)],
             'enc_cuboid_strategy': [('l', 'l', 'l'), ('d', 'd', 'd')],
             'dec_cross_cuboid_hw': [(4, 4), (4, 4)],
             'dec_cross_n_temporal': [1, 2],
         }
         
-        # Update with any provided kwargs
+        # Update with size-specific config
+        self.model_config.update(selected_config)
+        
+        # Update with any provided kwargs (allows override)
         self.model_config.update(model_kwargs)
         
-        # Initialize model - Import here to avoid issues
+        # Initialize model
         from earthformer.cuboid_transformer.cuboid_transformer import CuboidTransformerModel
         self.model = CuboidTransformerModel(**self.model_config)
         
@@ -69,9 +103,10 @@ class LandsatLSTPredictor(pl.LightningModule):
         
         # Band names for visualization
         self.band_names = ['DEM (+10k offset)', 'LST (°F)', 'Red (×10k)', 'Green (×10k)', 'Blue (×10k)', 
-                          'NDVI (×10k)', 'NDWI (×10k)', 'NDBI (×10k)', 'Albedo (×10k)']
+                        'NDVI (×10k)', 'NDWI (×10k)', 'NDBI (×10k)', 'Albedo (×10k)']
         
-        print(f"Model initialized with {sum(p.numel() for p in self.model.parameters()):,} parameters")
+        param_count = sum(p.numel() for p in self.model.parameters())
+        print(f"Model '{model_size}' initialized with {param_count:,} parameters")
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through the model"""
