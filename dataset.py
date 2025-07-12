@@ -75,6 +75,7 @@ class LandsatSequenceDataset(Dataset):
         load_to_ram: bool = False,        
         interpolated_scenes_file: str = "interpolated.txt",
         limit_batches: Optional[float] = None,
+        max_input_nodata_pct: float = 0.60,
         chunk_size: int = 100  # Increased default chunk size
     ):
         """
@@ -90,6 +91,7 @@ class LandsatSequenceDataset(Dataset):
         self._scene_validation_cache = {}
         self.cached_data = None
         self.cached_tiles = {}  # Cache for individual tiles
+        self.max_input_nodata_pct = max_input_nodata_pct
         
         # Load interpolated scenes to exclude from ground truth
         self.interpolated_scenes = load_interpolated_scenes(interpolated_scenes_file)
@@ -285,7 +287,7 @@ class LandsatSequenceDataset(Dataset):
         return normalized_scene
     
     def _process_single_city(self, city: str) -> List[Tuple[str, int, int, List[str], List[str]]]:
-        """Process a single city and return its sequences, filtering out those with interpolated ground truth or NODATA in outputs"""
+        """Process a single city and return its sequences, filtering out those with interpolated ground truth, NODATA in outputs, or >60% average NODATA in inputs"""
         city_sequences = []
         
         available_tiles = self._get_available_tiles(city)
@@ -315,7 +317,7 @@ class LandsatSequenceDataset(Dataset):
                                 has_interpolated_output = True
                                 break
                         
-                        # NEW: Check if any output scenes have NODATA in LST
+                        # Check if any output scenes have NODATA in LST
                         has_nodata_output = False
                         if not has_interpolated_output:  # Only check if not already filtered out
                             for month in output_months:
@@ -323,11 +325,60 @@ class LandsatSequenceDataset(Dataset):
                                     has_nodata_output = True
                                     break
                         
-                        # Only include sequence if NO output scenes are interpolated AND NO output scenes have NODATA
+                        # NEW: Check if input sequence has >60% average NODATA across all bands
+                        has_excessive_input_nodata = False
                         if not has_interpolated_output and not has_nodata_output:
+                            avg_nodata_pct = self._calculate_average_input_nodata(city, input_months, tile_row, tile_col, monthly_scenes)
+                            if avg_nodata_pct > self.max_input_nodata_pct:  # Use configurable threshold
+                                has_excessive_input_nodata = True
+                        
+                        # Only include sequence if passes all filters
+                        if not has_interpolated_output and not has_nodata_output and not has_excessive_input_nodata:
                             city_sequences.append((city, tile_row, tile_col, input_months, output_months))
         
         return city_sequences
+
+    def _calculate_average_input_nodata(self, city: str, input_months: List[str], tile_row: int, tile_col: int, monthly_scenes: Dict[str, str]) -> float:
+        """Calculate average NODATA percentage across all input sequence tiles (all bands)"""
+        try:
+            total_pixels = 0
+            total_nodata_pixels = 0
+            
+            band_names = ['LST', 'red', 'green', 'blue', 'ndvi', 'ndwi', 'ndbi', 'albedo']  # Skip DEM as it's constant
+            
+            for month in input_months:
+                scene_dir = Path(monthly_scenes[month])
+                
+                # Check each band for this timestep
+                for band_name in band_names:
+                    tile_path = scene_dir / f"{band_name}_row_{tile_row:03d}_col_{tile_col:03d}.tif"
+                    
+                    if not tile_path.exists():
+                        # If file missing, count entire tile as NODATA
+                        total_pixels += 128 * 128
+                        total_nodata_pixels += 128 * 128
+                        continue
+                    
+                    with rasterio.open(tile_path) as src:
+                        band_data = src.read(1)
+                        nodata_value = src.nodata if src.nodata is not None else 0
+                        
+                        # Count NODATA pixels (value 0 or actual nodata value)
+                        nodata_mask = (band_data == 0) | (band_data == nodata_value)
+                        
+                        total_pixels += band_data.size
+                        total_nodata_pixels += nodata_mask.sum()
+            
+            # Calculate average NODATA percentage across all input tiles
+            if total_pixels == 0:
+                return 1.0  # 100% NODATA if no valid data found
+            
+            avg_nodata_percentage = total_nodata_pixels / total_pixels
+            return avg_nodata_percentage
+            
+        except Exception as e:
+            print(f"Warning: Error calculating input NODATA for {city} {input_months} tile({tile_row},{tile_col}): {e}")
+            return 1.0  # Treat errors as 100% NODATA to be safe
 
     def _has_nodata_in_lst_tile(self, city: str, month: str, tile_row: int, tile_col: int, monthly_scenes: Dict[str, str]) -> bool:
         """Check if LST tile contains any NODATA pixels (value 0)"""
@@ -638,6 +689,7 @@ class LandsatDataModule(pl.LightningDataModule):
         debug_monthly_split: bool = False,
         debug_year: int = 2014,
         interpolated_scenes_file: str = "interpolated.txt",
+        max_input_nodata_pct: float = 0.60,
         limit_train_batches: Optional[float] = None,  # NEW PARAMETER
         limit_val_batches: Optional[float] = None     # NEW PARAMETER
     ):
@@ -655,6 +707,7 @@ class LandsatDataModule(pl.LightningDataModule):
         self.interpolated_scenes_file = interpolated_scenes_file
         self.limit_train_batches = limit_train_batches
         self.limit_val_batches = limit_val_batches
+        self.max_input_nodata_pct = max_input_nodata_pct
         
     def setup(self, stage: Optional[str] = None):
         """Setup datasets for each stage with interpolated scene filtering"""
@@ -672,7 +725,8 @@ class LandsatDataModule(pl.LightningDataModule):
                 debug_monthly_split=self.debug_monthly_split,
                 debug_year=self.debug_year,
                 interpolated_scenes_file=self.interpolated_scenes_file,                
-                limit_batches=self.limit_train_batches
+                limit_batches=self.limit_train_batches,
+                max_input_nodata_pct=self.max_input_nodata_pct
             )
             
             self.val_dataset = LandsatSequenceDataset(
@@ -686,7 +740,8 @@ class LandsatDataModule(pl.LightningDataModule):
                 debug_monthly_split=self.debug_monthly_split,
                 debug_year=self.debug_year,
                 interpolated_scenes_file=self.interpolated_scenes_file,                
-                limit_batches=self.limit_val_batches
+                limit_batches=self.limit_val_batches,
+                max_input_nodata_pct=self.max_input_nodata_pct
             )
         
         # Setup test dataset
@@ -701,7 +756,8 @@ class LandsatDataModule(pl.LightningDataModule):
                 test_years=self.test_years,
                 debug_monthly_split=self.debug_monthly_split,
                 debug_year=self.debug_year,
-                interpolated_scenes_file=self.interpolated_scenes_file,                
+                interpolated_scenes_file=self.interpolated_scenes_file,   
+                max_input_nodata_pct=self.max_input_nodata_pct,             
                 limit_batches=getattr(self, 'limit_test_batches', None)  # Use test-specific limit if available
             )
 
