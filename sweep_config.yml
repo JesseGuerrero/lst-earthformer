@@ -25,11 +25,11 @@ parameters:
   
   # Data filtering parameters
   max_input_nodata_pct:
-    values: [0.0, 0.5, 0.9]    
+    values: [0.0, 0.25, 0.5, 0.75, 1.0]    
   
   # Training constraints
   max_epochs:
-    value: 15
+    value: 25
   
   # Fixed parameters (not swept)
   gpus:
@@ -43,6 +43,14 @@ parameters:
   debug_year:
     value: 2014
   limit_train_batches:
-    value: 0.5
+    value: 1.0
   limit_val_batches:
-    value: 0.5
+    value: 1.0
+
+  # Year splits
+  train_years:
+    value: [2013, 2014, 2015]
+  val_years:
+    value: [2016]
+  test_years:
+    value: [2016]
