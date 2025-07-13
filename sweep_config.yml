@@ -43,9 +43,9 @@ parameters:
   debug_year:
     value: 2014
   limit_train_batches:
-    value: 0.5
+    value: 1.0
   limit_val_batches:
-    value: 0.5
+    value: 1.0
 
   # Year splits
   train_years:

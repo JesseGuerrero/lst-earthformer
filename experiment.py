@@ -60,7 +60,7 @@ def train_landsat_model_sweep():
     # Initialize wandb run (this gets the config from the sweep)
     wandb.init()
     config = wandb.config
-    
+
     # Set project name
     dataset_root = "./Data/ML"
     
@@ -99,8 +99,8 @@ def train_landsat_model_sweep():
         debug_year=config.debug_year,
         interpolated_scenes_file="./Data/ML/interpolated.txt",
         max_input_nodata_pct=config.max_input_nodata_pct,
-        limit_train_batches=config.limit_train_batches,
-        limit_val_batches=config.limit_val_batches
+        limit_train_batches=float(config.limit_train_batches),
+        limit_val_batches=float(config.limit_val_batches)
     )
     
     # The logger is already initialized by wandb.init()
@@ -147,8 +147,8 @@ def train_landsat_model_sweep():
         precision=16,
         accumulate_grad_batches=1,
         val_check_interval=0.5,
-        limit_train_batches=config.limit_train_batches,
-        limit_val_batches=config.limit_val_batches,
+        limit_train_batches=float(config.limit_train_batches),
+        limit_val_batches=float(config.limit_val_batches),
         callbacks=[checkpoint_callback, early_stopping, lr_monitor],
         logger=logger,
         log_every_n_steps=50,

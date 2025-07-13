@@ -711,6 +711,10 @@ class LandsatDataModule(pl.LightningDataModule):
         
     def setup(self, stage: Optional[str] = None):
         """Setup datasets for each stage with interpolated scene filtering"""
+        if self.limit_train_batches == 1:
+            self.limit_train_batches = 1.0
+        if self.limit_val_batches == 1:
+            self.limit_val_batches = 1.0
         
         # Setup train and val datasets for training
         if stage == "fit" or stage is None:
