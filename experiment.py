@@ -125,14 +125,14 @@ def train_landsat_model_sweep():
         dirpath=checkpoint_dir,
         filename=f'{wandb.run.name}-{{epoch:02d}}-{{val_rmse_F:.3f}}',
         save_top_k=1,  # Only save best model for sweeps
-        monitor='val_rmse_F',
+        monitor='val_loss',
         mode='min',
         save_last=False,  # Don't save last checkpoint for sweeps
         verbose=True
     )
     
     early_stopping = EarlyStopping(
-        monitor='val_rmse_F',
+        monitor='val_loss',
         patience=8 if config.debug_monthly_split else 12,
         mode='min',
         verbose=True
