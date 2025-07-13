@@ -183,47 +183,6 @@ def train_landsat_model_sweep():
     finally:
         wandb.finish()
 
-def validate_and_cast_config(config):
-    """Validate and cast wandb config to expected types."""
-    casted_config = {}
-    
-    # Define expected types
-    expected_types = {
-        'learning_rate': float,
-        'batch_size': int,
-        'max_epochs': int,
-        'num_workers': int,
-        'input_sequence_length': int,
-        'output_sequence_length': int,
-        'gpus': int,
-        'limit_train_batches': float,
-        'limit_val_batches': float,
-        'max_input_nodata_pct': float,
-        'debug_year': int,
-        'debug_monthly_split': bool,
-        'precision': str,
-        'model_size': str,
-    }
-    
-    for key, value in config.items():
-        if key in expected_types:
-            try:
-                casted_config[key] = expected_types[key](value)
-            except (ValueError, TypeError) as e:
-                print(f"❌ Error casting {key}={value} to {expected_types[key]}: {e}")
-                raise
-        elif key in ['train_years', 'val_years', 'test_years']:
-            # Handle year lists - ensure they're lists of integers
-            if isinstance(value, list):
-                casted_config[key] = [int(year) for year in value]
-            else:
-                # If it's a single value, make it a list
-                casted_config[key] = [int(value)]
-        else:
-            casted_config[key] = value
-    
-    return casted_config
-
 # python experiment.py --agent bkdcaibr
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train Landsat LST Prediction Model')
