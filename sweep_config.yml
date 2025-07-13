@@ -16,26 +16,26 @@ parameters:
   batch_size:
     value: 2
   
-  # Sequence lengths
+  # Sequence lengths, only do 6 and 12
   input_sequence_length:
-    values: [3, 6]
+    values: [3]
   
   output_sequence_length:
     value: 1
   
   # Data filtering parameters
   max_input_nodata_pct:
-    values: [0.0, 0.5, 1.0]    
+    values: [0.0, 0.5, 0.9]    
   
   # Training constraints
   max_epochs:
-    value: 10
+    value: 15
   
   # Fixed parameters (not swept)
   gpus:
     value: 1
   precision:
-    value: "16"
+    value: 16
   num_workers:
     value: 8
   debug_monthly_split:
@@ -43,14 +43,6 @@ parameters:
   debug_year:
     value: 2014
   limit_train_batches:
-    value: 0.3
+    value: 0.5
   limit_val_batches:
-    value: 0.3
-  
-  # Year splits
-  train_years:
-    value: [2013, 2014, 2015]
-  val_years:
-    value: [2016]
-  test_years:
-    value: [2016]
+    value: 0.5

@@ -14,7 +14,7 @@ class LandsatLSTPredictor(pl.LightningModule):
         weight_decay: float = 1e-5,
         warmup_steps: int = 1000,
         max_epochs: int = 100,
-        log_images_every_n_epochs: int = 5,
+        log_images_every_n_epochs: int = 1,
         max_images_to_log: int = 4,
         input_sequence_length: int = 3,
         output_sequence_length: int = 3,
@@ -251,9 +251,59 @@ class LandsatLSTPredictor(pl.LightningModule):
             self.log('train_rmse_F', temp_rmse_f, on_step=False, on_epoch=True, prog_bar=True)
         
         return loss
+    
+    def debug_image_logging_in_sweep(self, inputs, targets, predictions, stage="debug"):
+        """
+        Debug version of image logging to identify sweep issues
+        """
+        print(f"\n🔍 DEBUG: Image logging called for {stage}")
+        print(f"📊 Logger type: {type(self.logger)}")
+        print(f"🔗 Wandb available: {wandb.run is not None}")
+        
+        if wandb.run:
+            print(f"🏃 Wandb run name: {wandb.run.name}")
+            print(f"📁 Wandb run id: {wandb.run.id}")
+        
+        # Check if logger is WandB
+        if not isinstance(self.logger, pl.loggers.WandbLogger):
+            print(f"❌ Logger is not WandbLogger: {type(self.logger)}")
+            return
+        
+        # Check tensor shapes and types
+        print(f"📐 Input shape: {inputs.shape}, dtype: {inputs.dtype}")
+        print(f"📐 Target shape: {targets.shape}, dtype: {targets.dtype}")
+        print(f"📐 Prediction shape: {predictions.shape}, dtype: {predictions.dtype}")
+        
+        # Check if we're in the right epoch
+        print(f"📅 Current epoch: {self.current_epoch}")
+        print(f"📅 Log every N epochs: {self.log_images_every_n_epochs}")
+        print(f"✅ Should log images: {self.current_epoch % self.log_images_every_n_epochs == 0}")
+        
+        try:
+            # Create a simple test image
+            import matplotlib.pyplot as plt
+            import numpy as np
+            
+            fig, ax = plt.subplots(1, 1, figsize=(6, 4))
+            ax.imshow(np.random.random((64, 64)), cmap='viridis')
+            ax.set_title(f"Debug Image - Epoch {self.current_epoch}")
+            ax.axis('off')
+            
+            # Try to log the test image
+            self.logger.experiment.log({
+                f"debug_test_image_{stage}": wandb.Image(fig)
+            })
+            
+            plt.close(fig)
+            print("✅ Successfully logged debug image!")
+            
+        except Exception as e:
+            print(f"❌ Failed to log debug image: {e}")
+            import traceback
+            traceback.print_exc()
         
     def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
-        """Validation step with temperature metrics in Fahrenheit"""
+        """Validation step with direct image logging that works in sweeps"""
         inputs, targets = batch
         predictions = self.forward(inputs)
         
@@ -265,7 +315,7 @@ class LandsatLSTPredictor(pl.LightningModule):
         self.log('val_loss', torch.sqrt(loss), on_step=False, on_epoch=True)
         self.log('val_mae', mae, on_step=False, on_epoch=True)
         
-        # NEW: Calculate metrics in Fahrenheit
+        # Calculate metrics in Fahrenheit
         with torch.no_grad():
             # Denormalize to Fahrenheit: value * (max - min) + min
             pred_fahrenheit = predictions.detach() * (211.0 - (-189.0)) + (-189.0)
@@ -287,165 +337,123 @@ class LandsatLSTPredictor(pl.LightningModule):
                 if torch.isfinite(correlation):
                     self.log('val_correlation', correlation, on_step=False, on_epoch=True)
         
-        return loss
-    
-    def log_simple_sequence_visualization(self, inputs: torch.Tensor, targets: torch.Tensor, 
-                            predictions: torch.Tensor, stage: str = "val", 
-                            batch_idx: int = 0, max_samples: int = 2):
-        """
-        Create a simple visualization showing input sequences, target sequences, and predictions
-        All images will show LST temperature data in Fahrenheit with per-image scaling
-        NODATA pixels (0 before normalization) are made transparent
-        """
-        if not isinstance(self.logger, pl.loggers.WandbLogger):
-            return
-        
-        # Convert tensors to float32 for visualization to avoid precision issues
-        inputs = inputs.float().cpu()
-        targets = targets.float().cpu()
-        predictions = predictions.float().cpu()
-        
-        try:            
-            # Only log every N epochs during training/validation
-            if stage in ["train", "val"] and self.current_epoch % self.log_images_every_n_epochs != 0:
-                return
+        # DIRECT IMAGE LOGGING IN VALIDATION STEP
+        # This works in both normal runs and sweeps
+        if (batch_idx == 0 and  # Only first batch
+            self.current_epoch % self.log_images_every_n_epochs == 0 and  # Every N epochs
+            wandb.run is not None):  # Only if wandb is available
             
-            # Limit number of samples to visualize
-            batch_size = min(inputs.shape[0], max_samples)
-            
-            for sample_idx in range(batch_size):
-                # Extract single sample (already converted to float32 and CPU)
-                input_seq = inputs[sample_idx].numpy()    # [time, H, W, channels]
-                target_seq = targets[sample_idx].numpy()  # [time, H, W, 1]
-                pred_seq = predictions[sample_idx].numpy() # [time, H, W, 1]
+            try:
+                print(f"🖼️ Attempting to log images at epoch {self.current_epoch}")
                 
-                # Get sequence lengths
+                # Convert to CPU and numpy
+                inputs_cpu = inputs[0:1].float().cpu().numpy()  # Take only first sample
+                targets_cpu = targets[0:1].float().cpu().numpy()
+                predictions_cpu = predictions[0:1].detach().float().cpu().numpy()
+                
+                # Extract sequences
+                input_seq = inputs_cpu[0]    # [time, H, W, channels]
+                target_seq = targets_cpu[0]  # [time, H, W, 1]
+                pred_seq = predictions_cpu[0] # [time, H, W, 1]
+                
                 input_len = input_seq.shape[0]
                 output_len = target_seq.shape[0]
-                
-                # Get metadata for this sample
-                metadata_info = self._get_sample_metadata(batch_idx, sample_idx)
-                
-                # Create figure: 3 rows x max timesteps columns
                 max_timesteps = max(input_len, output_len)
+                
+                # Create the visualization
                 fig, axes = plt.subplots(3, max_timesteps, figsize=(4*max_timesteps, 12))
                 
-                # Handle case where we only have one timestep
+                # Handle single timestep case
                 if max_timesteps == 1:
                     axes = axes.reshape(3, 1)
                 
-                # Set background color for better contrast with transparent pixels
                 fig.patch.set_facecolor('lightgray')
                 
-                # Row 0: Input sequences (show LST band - index 1)
+                # Row 0: Input sequences (LST band - index 1)
                 for t in range(input_len):
                     ax = axes[0, t]
-                    ax.set_facecolor('lightgray')  # Set axes background
+                    ax.set_facecolor('lightgray')
                     
-                    lst_input = input_seq[t, :, :, 1]  # LST is band index 1
-                    # Denormalize from [0,1] back to Fahrenheit
+                    lst_input = input_seq[t, :, :, 1]  # LST band
                     lst_input_fahrenheit = lst_input * (211.0 - (-189.0)) + (-189.0)
                     
-                    # Create mask for NODATA pixels (originally 0 before normalization)
-                    # In normalized space, NODATA (0) becomes -189°F after denormalization
-                    nodata_mask = np.abs(lst_input_fahrenheit - (-189.0)) < 0.1  # Small tolerance
-                    
-                    # Create masked array for transparency
+                    # Create mask for NODATA
+                    nodata_mask = np.abs(lst_input_fahrenheit - (-189.0)) < 0.1
                     lst_masked = np.ma.masked_where(nodata_mask, lst_input_fahrenheit)
                     
-                    # Use actual min/max of valid data for better color contrast
-                    if not lst_masked.mask.all():  # Check if we have valid data
+                    if not lst_masked.mask.all():
                         vmin_input = lst_masked.min()
                         vmax_input = lst_masked.max()
                         im = ax.imshow(lst_masked, cmap='RdYlBu_r', vmin=vmin_input, vmax=vmax_input, alpha=0.9)
                         ax.set_title(f'Input T={t+1}\n({vmin_input:.1f}°F - {vmax_input:.1f}°F)', fontsize=10)
+                        plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
                     else:
-                        # All data is NODATA
                         ax.imshow(np.zeros_like(lst_input_fahrenheit), cmap='RdYlBu_r', alpha=0)
                         ax.set_title(f'Input T={t+1}\n(No Valid Data)', fontsize=10)
-                        im = None
                     
                     ax.axis('off')
-                    if im is not None:
-                        plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
                 
-                # Fill remaining input columns if needed
+                # Fill remaining input columns
                 for t in range(input_len, max_timesteps):
                     axes[0, t].set_facecolor('lightgray')
                     axes[0, t].axis('off')
                     axes[0, t].text(0.5, 0.5, 'N/A', ha='center', va='center', transform=axes[0, t].transAxes)
                 
-                # Row 1: Target sequences (LST only)
+                # Row 1: Target sequences
                 for t in range(output_len):
                     ax = axes[1, t]
-                    ax.set_facecolor('lightgray')  # Set axes background
+                    ax.set_facecolor('lightgray')
                     
-                    lst_target = target_seq[t, :, :, 0]  # LST target (only channel)
-                    # Denormalize from [0,1] back to Fahrenheit
+                    lst_target = target_seq[t, :, :, 0]
                     lst_target_fahrenheit = lst_target * (211.0 - (-189.0)) + (-189.0)
                     
-                    # Create mask for NODATA pixels
                     nodata_mask = np.abs(lst_target_fahrenheit - (-189.0)) < 0.1
-                    
-                    # Create masked array for transparency
                     lst_masked = np.ma.masked_where(nodata_mask, lst_target_fahrenheit)
                     
-                    # Use actual min/max of valid data for better color contrast
-                    if not lst_masked.mask.all():  # Check if we have valid data
+                    if not lst_masked.mask.all():
                         vmin_target = lst_masked.min()
                         vmax_target = lst_masked.max()
                         im = ax.imshow(lst_masked, cmap='RdYlBu_r', vmin=vmin_target, vmax=vmax_target, alpha=0.9)
                         ax.set_title(f'Target T={input_len+t+1}\n({vmin_target:.1f}°F - {vmax_target:.1f}°F)', fontsize=10)
+                        plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
                     else:
-                        # All data is NODATA
                         ax.imshow(np.zeros_like(lst_target_fahrenheit), cmap='RdYlBu_r', alpha=0)
                         ax.set_title(f'Target T={input_len+t+1}\n(No Valid Data)', fontsize=10)
-                        im = None
                     
                     ax.axis('off')
-                    if im is not None:
-                        plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
                 
-                # Fill remaining target columns if needed
+                # Fill remaining target columns
                 for t in range(output_len, max_timesteps):
                     axes[1, t].set_facecolor('lightgray')
                     axes[1, t].axis('off')
                     axes[1, t].text(0.5, 0.5, 'N/A', ha='center', va='center', transform=axes[1, t].transAxes)
                 
-                # Row 2: Prediction sequences (LST only)
+                # Row 2: Prediction sequences
                 for t in range(output_len):
                     ax = axes[2, t]
-                    ax.set_facecolor('lightgray')  # Set axes background
+                    ax.set_facecolor('lightgray')
                     
-                    lst_pred = pred_seq[t, :, :, 0]  # LST prediction (only channel)
-                    # Denormalize from [0,1] back to Fahrenheit
+                    lst_pred = pred_seq[t, :, :, 0]
                     lst_pred_fahrenheit = lst_pred * (211.0 - (-189.0)) + (-189.0)
                     
-                    # For predictions, we might want to mask based on the target's valid pixels
-                    # or use the same NODATA threshold
+                    # Use target's mask for predictions
                     target_lst = target_seq[t, :, :, 0] * (211.0 - (-189.0)) + (-189.0)
                     nodata_mask = np.abs(target_lst - (-189.0)) < 0.1
-                    
-                    # Create masked array for transparency
                     lst_masked = np.ma.masked_where(nodata_mask, lst_pred_fahrenheit)
                     
-                    # Use actual min/max of valid data for better color contrast
-                    if not lst_masked.mask.all():  # Check if we have valid data
+                    if not lst_masked.mask.all():
                         vmin_pred = lst_masked.min()
                         vmax_pred = lst_masked.max()
                         im = ax.imshow(lst_masked, cmap='RdYlBu_r', vmin=vmin_pred, vmax=vmax_pred, alpha=0.9)
                         ax.set_title(f'Prediction T={input_len+t+1}\n({vmin_pred:.1f}°F - {vmax_pred:.1f}°F)', fontsize=10)
+                        plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
                     else:
-                        # All data is NODATA
                         ax.imshow(np.zeros_like(lst_pred_fahrenheit), cmap='RdYlBu_r', alpha=0)
                         ax.set_title(f'Prediction T={input_len+t+1}\n(No Valid Data)', fontsize=10)
-                        im = None
                     
                     ax.axis('off')
-                    if im is not None:
-                        plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
                 
-                # Fill remaining prediction columns if needed
+                # Fill remaining prediction columns
                 for t in range(output_len, max_timesteps):
                     axes[2, t].set_facecolor('lightgray')
                     axes[2, t].axis('off')
@@ -459,27 +467,233 @@ class LandsatLSTPredictor(pl.LightningModule):
                 axes[2, 0].text(-0.2, 0.5, 'PREDICTED LST', rotation=90, ha='center', va='center',
                             transform=axes[2, 0].transAxes, fontsize=12, fontweight='bold')
                 
-                # Create title with metadata
-                title_parts = [f'{stage.upper()} - Batch {batch_idx}, Sample {sample_idx+1}']
-                if metadata_info:
-                    title_parts.append(f'City: {metadata_info["city"]}, Tile: {metadata_info["tile_position"]}')
-                    if "input_date_range" in metadata_info:
-                        title_parts.append(f'Dates: {metadata_info["input_date_range"]} → {metadata_info["output_date_range"]}')
-                title_parts.append(f'Input Length: {input_len}, Output Length: {output_len}')
-                title_parts.append('Gray areas = NODATA pixels (transparent)')
-                
-                plt.suptitle('\n'.join(title_parts), fontsize=12)
+                # Add title
+                plt.suptitle(f'Validation - Epoch {self.current_epoch}, Batch {batch_idx}\n'
+                            f'Input Length: {input_len}, Output Length: {output_len}', fontsize=12)
                 plt.tight_layout()
                 
-                # Log to wandb
-                self.logger.experiment.log({
-                    f"{stage}_lst_sequence_batch{batch_idx}_sample{sample_idx}": wandb.Image(fig)
-                })
+                # Log directly to wandb (this should work in sweeps)
+                wandb.log({
+                    "validation_predictions": wandb.Image(fig)
+                }, step=self.global_step)
                 
                 plt.close(fig)
+                print(f"✅ Successfully logged validation image at epoch {self.current_epoch}")
                 
-        except Exception as e:
-            print(f"Warning: Failed to create LST temperature visualization: {e}")
+            except Exception as e:
+                print(f"❌ Image logging failed in validation_step: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        return loss
+    
+    # def log_simple_sequence_visualization(self, inputs: torch.Tensor, targets: torch.Tensor, 
+    #                     predictions: torch.Tensor, stage: str = "val", 
+    #                     batch_idx: int = 0, max_samples: int = 2):
+    #     """
+    #     FIXED VERSION: Create visualization that works in sweeps
+    #     """
+    #     # CRITICAL FIX 1: Check if wandb is properly initialized
+    #     if not wandb.run:
+    #         print(f"⚠️ Wandb run not initialized - skipping image logging for {stage}")
+    #         return
+        
+    #     # CRITICAL FIX 2: For sweeps, use wandb.log directly instead of self.logger.experiment.log
+    #     # The logger might not be properly connected to the sweep run
+        
+    #     # Convert tensors to float32 for visualization to avoid precision issues
+    #     inputs = inputs.float().cpu()
+    #     targets = targets.float().cpu()
+    #     predictions = predictions.float().cpu()
+        
+    #     try:                        
+    #         # Limit number of samples to visualize
+    #         batch_size = min(inputs.shape[0], max_samples)
+            
+    #         for sample_idx in range(batch_size):
+    #             # Extract single sample (already converted to float32 and CPU)
+    #             input_seq = inputs[sample_idx].numpy()    # [time, H, W, channels]
+    #             target_seq = targets[sample_idx].numpy()  # [time, H, W, 1]
+    #             pred_seq = predictions[sample_idx].numpy() # [time, H, W, 1]
+                
+    #             # Get sequence lengths
+    #             input_len = input_seq.shape[0]
+    #             output_len = target_seq.shape[0]
+                
+    #             # Get metadata for this sample
+    #             metadata_info = self._get_sample_metadata(batch_idx, sample_idx)
+                
+    #             # Create figure: 3 rows x max timesteps columns
+    #             max_timesteps = max(input_len, output_len)
+    #             fig, axes = plt.subplots(3, max_timesteps, figsize=(4*max_timesteps, 12))
+                
+    #             # Handle case where we only have one timestep
+    #             if max_timesteps == 1:
+    #                 axes = axes.reshape(3, 1)
+                
+    #             # Set background color for better contrast with transparent pixels
+    #             fig.patch.set_facecolor('lightgray')
+                
+    #             # Row 0: Input sequences (show LST band - index 1)
+    #             for t in range(input_len):
+    #                 ax = axes[0, t]
+    #                 ax.set_facecolor('lightgray')  # Set axes background
+                    
+    #                 lst_input = input_seq[t, :, :, 1]  # LST is band index 1
+    #                 # Denormalize from [0,1] back to Fahrenheit
+    #                 lst_input_fahrenheit = lst_input * (211.0 - (-189.0)) + (-189.0)
+                    
+    #                 # Create mask for NODATA pixels (originally 0 before normalization)
+    #                 # In normalized space, NODATA (0) becomes -189°F after denormalization
+    #                 nodata_mask = np.abs(lst_input_fahrenheit - (-189.0)) < 0.1  # Small tolerance
+                    
+    #                 # Create masked array for transparency
+    #                 lst_masked = np.ma.masked_where(nodata_mask, lst_input_fahrenheit)
+                    
+    #                 # Use actual min/max of valid data for better color contrast
+    #                 if not lst_masked.mask.all():  # Check if we have valid data
+    #                     vmin_input = lst_masked.min()
+    #                     vmax_input = lst_masked.max()
+    #                     im = ax.imshow(lst_masked, cmap='RdYlBu_r', vmin=vmin_input, vmax=vmax_input, alpha=0.9)
+    #                     ax.set_title(f'Input T={t+1}\n({vmin_input:.1f}°F - {vmax_input:.1f}°F)', fontsize=10)
+    #                 else:
+    #                     # All data is NODATA
+    #                     ax.imshow(np.zeros_like(lst_input_fahrenheit), cmap='RdYlBu_r', alpha=0)
+    #                     ax.set_title(f'Input T={t+1}\n(No Valid Data)', fontsize=10)
+    #                     im = None
+                    
+    #                 ax.axis('off')
+    #                 if im is not None:
+    #                     plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
+                
+    #             # Fill remaining input columns if needed
+    #             for t in range(input_len, max_timesteps):
+    #                 axes[0, t].set_facecolor('lightgray')
+    #                 axes[0, t].axis('off')
+    #                 axes[0, t].text(0.5, 0.5, 'N/A', ha='center', va='center', transform=axes[0, t].transAxes)
+                
+    #             # Row 1: Target sequences (LST only)
+    #             for t in range(output_len):
+    #                 ax = axes[1, t]
+    #                 ax.set_facecolor('lightgray')  # Set axes background
+                    
+    #                 lst_target = target_seq[t, :, :, 0]  # LST target (only channel)
+    #                 # Denormalize from [0,1] back to Fahrenheit
+    #                 lst_target_fahrenheit = lst_target * (211.0 - (-189.0)) + (-189.0)
+                    
+    #                 # Create mask for NODATA pixels
+    #                 nodata_mask = np.abs(lst_target_fahrenheit - (-189.0)) < 0.1
+                    
+    #                 # Create masked array for transparency
+    #                 lst_masked = np.ma.masked_where(nodata_mask, lst_target_fahrenheit)
+                    
+    #                 # Use actual min/max of valid data for better color contrast
+    #                 if not lst_masked.mask.all():  # Check if we have valid data
+    #                     vmin_target = lst_masked.min()
+    #                     vmax_target = lst_masked.max()
+    #                     im = ax.imshow(lst_masked, cmap='RdYlBu_r', vmin=vmin_target, vmax=vmax_target, alpha=0.9)
+    #                     ax.set_title(f'Target T={input_len+t+1}\n({vmin_target:.1f}°F - {vmax_target:.1f}°F)', fontsize=10)
+    #                 else:
+    #                     # All data is NODATA
+    #                     ax.imshow(np.zeros_like(lst_target_fahrenheit), cmap='RdYlBu_r', alpha=0)
+    #                     ax.set_title(f'Target T={input_len+t+1}\n(No Valid Data)', fontsize=10)
+    #                     im = None
+                    
+    #                 ax.axis('off')
+    #                 if im is not None:
+    #                     plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
+                
+    #             # Fill remaining target columns if needed
+    #             for t in range(output_len, max_timesteps):
+    #                 axes[1, t].set_facecolor('lightgray')
+    #                 axes[1, t].axis('off')
+    #                 axes[1, t].text(0.5, 0.5, 'N/A', ha='center', va='center', transform=axes[1, t].transAxes)
+                
+    #             # Row 2: Prediction sequences (LST only)
+    #             for t in range(output_len):
+    #                 ax = axes[2, t]
+    #                 ax.set_facecolor('lightgray')  # Set axes background
+                    
+    #                 lst_pred = pred_seq[t, :, :, 0]  # LST prediction (only channel)
+    #                 # Denormalize from [0,1] back to Fahrenheit
+    #                 lst_pred_fahrenheit = lst_pred * (211.0 - (-189.0)) + (-189.0)
+                    
+    #                 # For predictions, we might want to mask based on the target's valid pixels
+    #                 # or use the same NODATA threshold
+    #                 target_lst = target_seq[t, :, :, 0] * (211.0 - (-189.0)) + (-189.0)
+    #                 nodata_mask = np.abs(target_lst - (-189.0)) < 0.1
+                    
+    #                 # Create masked array for transparency
+    #                 lst_masked = np.ma.masked_where(nodata_mask, lst_pred_fahrenheit)
+                    
+    #                 # Use actual min/max of valid data for better color contrast
+    #                 if not lst_masked.mask.all():  # Check if we have valid data
+    #                     vmin_pred = lst_masked.min()
+    #                     vmax_pred = lst_masked.max()
+    #                     im = ax.imshow(lst_masked, cmap='RdYlBu_r', vmin=vmin_pred, vmax=vmax_pred, alpha=0.9)
+    #                     ax.set_title(f'Prediction T={input_len+t+1}\n({vmin_pred:.1f}°F - {vmax_pred:.1f}°F)', fontsize=10)
+    #                 else:
+    #                     # All data is NODATA
+    #                     ax.imshow(np.zeros_like(lst_pred_fahrenheit), cmap='RdYlBu_r', alpha=0)
+    #                     ax.set_title(f'Prediction T={input_len+t+1}\n(No Valid Data)', fontsize=10)
+    #                     im = None
+                    
+    #                 ax.axis('off')
+    #                 if im is not None:
+    #                     plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
+                
+    #             # Fill remaining prediction columns if needed
+    #             for t in range(output_len, max_timesteps):
+    #                 axes[2, t].set_facecolor('lightgray')
+    #                 axes[2, t].axis('off')
+    #                 axes[2, t].text(0.5, 0.5, 'N/A', ha='center', va='center', transform=axes[2, t].transAxes)
+                
+    #             # Add row labels
+    #             axes[0, 0].text(-0.2, 0.5, 'INPUT LST', rotation=90, ha='center', va='center',
+    #                         transform=axes[0, 0].transAxes, fontsize=12, fontweight='bold')
+    #             axes[1, 0].text(-0.2, 0.5, 'TARGET LST', rotation=90, ha='center', va='center',
+    #                         transform=axes[1, 0].transAxes, fontsize=12, fontweight='bold')
+    #             axes[2, 0].text(-0.2, 0.5, 'PREDICTED LST', rotation=90, ha='center', va='center',
+    #                         transform=axes[2, 0].transAxes, fontsize=12, fontweight='bold')
+                
+    #             # Create title with metadata
+    #             title_parts = [f'{stage.upper()} - Batch {batch_idx}, Sample {sample_idx+1}']
+    #             if metadata_info:
+    #                 title_parts.append(f'City: {metadata_info["city"]}, Tile: {metadata_info["tile_position"]}')
+    #                 if "input_date_range" in metadata_info:
+    #                     title_parts.append(f'Dates: {metadata_info["input_date_range"]} → {metadata_info["output_date_range"]}')
+    #             title_parts.append(f'Input Length: {input_len}, Output Length: {output_len}')
+    #             title_parts.append('Gray areas = NODATA pixels (transparent)')
+                
+    #             plt.suptitle('\n'.join(title_parts), fontsize=12)
+    #             plt.tight_layout()
+                
+    #             # CRITICAL FIX 3: Use wandb.log directly instead of self.logger.experiment.log
+    #             # This ensures compatibility with sweeps
+    #             image_key = f"{stage}_lst_sequence_batch{batch_idx}_sample{sample_idx}"
+                
+    #             try:
+    #                 # Method 1: Direct wandb logging (most reliable for sweeps)
+    #                 wandb.log({image_key: wandb.Image(fig)})
+    #                 print(f"✅ Successfully logged image: {image_key}")
+                    
+    #             except Exception as log_error:
+    #                 print(f"❌ Failed to log image {image_key}: {log_error}")
+                    
+    #                 # Method 2: Fallback to logger if direct logging fails
+    #                 try:
+    #                     if hasattr(self, 'logger') and hasattr(self.logger, 'experiment'):
+    #                         self.logger.experiment.log({image_key: wandb.Image(fig)})
+    #                         print(f"✅ Successfully logged image via logger: {image_key}")
+    #                 except Exception as fallback_error:
+    #                     print(f"❌ Fallback logging also failed: {fallback_error}")
+                
+    #             plt.close(fig)
+                
+    #     except Exception as e:
+    #         print(f"Warning: Failed to create LST temperature visualization: {e}")
+    #         import traceback
+    #         traceback.print_exc()
 
     def _get_sample_metadata(self, batch_idx: int, sample_idx: int) -> dict:
         """Get metadata for a specific sample in the batch"""
@@ -526,38 +740,40 @@ class LandsatLSTPredictor(pl.LightningModule):
             return {}
 
 
-    def on_validation_epoch_end(self):
-        """Called at the end of validation epoch - good place to log visualizations"""
-        super().on_validation_epoch_end()
+    # def on_validation_epoch_end(self):
+    #     """Called at the end of validation epoch - good place to log visualizations"""
+    #     super().on_validation_epoch_end()
         
-        # Get a sample batch for visualization
-        if hasattr(self.trainer, 'datamodule') and hasattr(self.trainer.datamodule, 'val_dataloader'):
-            try:
-                val_dataloader = self.trainer.datamodule.val_dataloader()
-                sample_batch = next(iter(val_dataloader))
+    #     # Get a sample batch for visualization
+    #     if hasattr(self.trainer, 'datamodule') and hasattr(self.trainer.datamodule, 'val_dataloader'):
+    #         try:
+    #             val_dataloader = self.trainer.datamodule.val_dataloader()
+    #             sample_batch = next(iter(val_dataloader))
                 
-                # Move to device if needed
-                if len(sample_batch) == 2:
-                    inputs, targets = sample_batch
-                    if self.device != inputs.device:
-                        inputs = inputs.to(self.device)
-                        targets = targets.to(self.device)
+    #             # Move to device if needed
+    #             if len(sample_batch) == 2:
+    #                 inputs, targets = sample_batch
+    #                 if self.device != inputs.device:
+    #                     inputs = inputs.to(self.device)
+    #                     targets = targets.to(self.device)
                     
-                    # Get predictions with proper precision handling
-                    with torch.no_grad():
-                        # Ensure inputs are in the same precision as model
-                        if self.dtype != inputs.dtype:
-                            inputs = inputs.to(dtype=self.dtype)
-                        predictions = self.forward(inputs)
+    #                 # Get predictions with proper precision handling
+    #                 with torch.no_grad():
+    #                     # Ensure inputs are in the same precision as model
+    #                     if self.dtype != inputs.dtype:
+    #                         inputs = inputs.to(dtype=self.dtype)
+    #                     predictions = self.forward(inputs)
                     
-                    # Create visualization
-                    self.log_simple_sequence_visualization(
-                        inputs, targets, predictions, 
-                        stage="val", batch_idx=0, max_samples=2
-                    )
+    #                 # Create visualization
+    #                 # self.debug_image_logging_in_sweep(inputs, targets, predictions, stage="val", batch_idx=0, max_samples=2)
+    #                 self.log_simple_sequence_visualization(
+    #                     inputs, targets, predictions, 
+    #                     stage="val", batch_idx=0, max_samples=2
+    #                 )
+
                     
-            except Exception as e:
-                print(f"Warning: Could not create validation visualization: {e}")
+    #         except Exception as e:
+    #             print(f"Warning: Could not create validation visualization: {e}")
 
     def test_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
         """Test step"""

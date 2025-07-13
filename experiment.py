@@ -144,9 +144,9 @@ def train_landsat_model_sweep():
         max_epochs=config.max_epochs,
         accelerator='gpu' if config.gpus > 0 else 'cpu',
         devices=config.gpus if config.gpus > 0 else None,
-        precision=config.precision,
+        precision=16,
         accumulate_grad_batches=1,
-        val_check_interval=1.0,
+        val_check_interval=0.5,
         limit_train_batches=config.limit_train_batches,
         limit_val_batches=config.limit_val_batches,
         callbacks=[checkpoint_callback, early_stopping, lr_monitor],
@@ -224,7 +224,7 @@ def validate_and_cast_config(config):
     
     return casted_config
 
-# python experiment.py --agent dnig1n5m
+# python experiment.py --agent bkdcaibr
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train Landsat LST Prediction Model')
     parser.add_argument('--sweep-init', action='store_true', help='Initialize a new sweep')
