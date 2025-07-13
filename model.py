@@ -113,21 +113,16 @@ class LandsatLSTPredictor(pl.LightningModule):
         return self.model(x)    
     
     def masked_loss(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """Calculate MSE loss with NODATA masking (value 0)"""
-        # Create mask where targets are not NODATA (not 0)
         valid_mask = (targets != 0).float()
-        
-        # Calculate element-wise loss
         loss_elements = self.criterion(predictions, targets)
-        
-        # Apply mask and calculate mean only over valid pixels
         masked_loss = loss_elements * valid_mask
         valid_count = valid_mask.sum()
         
         if valid_count > 0:
             return masked_loss.sum() / valid_count
         else:
-            return torch.tensor(0.0, device=predictions.device, requires_grad=True)
+            # Return a small loss that won't cause NaN gradients
+            return torch.tensor(1e-8, device=predictions.device, dtype=predictions.dtype)
         
     def masked_mae(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """Calculate MAE with NODATA masking"""

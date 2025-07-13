@@ -11,7 +11,7 @@ parameters:
   
   # Training parameters - FIXED: use proper wandb syntax
   learning_rate:
-    values: [0.0001, 0.001, 0.01]
+    values: [0.00001, 0.0001, 0.001]
   
   batch_size:
     value: 2
