@@ -456,14 +456,60 @@ class LandsatSequenceDataset(Dataset):
         
         self.allowed_months = None
 
+    def get_excluded_cities():
+        """Return list of cities to exclude from validation set"""
+        return [
+            "Athens-Clarke County unified government balance_GA",
+            "Atlanta_GA",
+            "Aurora_CO",
+            "Birmingham_AL",
+            "Cape Coral_FL",
+            "Chesapeake_VA",
+            "Columbia_SC",
+            "Columbus_OH",
+            "Denver_CO",
+            "Durham_NC",
+            "Hollywood_FL",
+            "Jacksonville_FL",
+            "Lehigh Acres_FL",
+            "LouisvilleJefferson County metro government balance_KY",
+            "Lubbock_TX",
+            "Madison_WI",
+            "Marana_AZ",
+            "Miami_FL",
+            "Mobile_AL",
+            "Montgomery_AL",
+            "New Orleans_LA",
+            "North Port_FL",
+            "Palm Springs_CA",
+            "Peoria_AZ",
+            "Phoenix_AZ",
+            "Raleigh_NC",
+            "Richmond_VA",
+            "San Francisco_CA",
+            "Savannah_GA",
+            "Shreveport_LA",
+            "Stockton_CA",
+            "Tampa_FL",
+            "Yuma_AZ"
+        ]
+
     def _get_all_cities(self) -> List[str]:
-        """Get all available cities from the tiled dataset"""
+        """Get all available cities from the tiled dataset, excluding validation-excluded cities for val split"""
         if self.cluster == "all":
             cities_dir = self.dataset_root / "Cities_Tiles"
         else:
             cities_dir = self.dataset_root / "Clustered" / self.cluster / "Cities_Tiles"
-        cities = [d.name for d in cities_dir.iterdir() if d.is_dir()]
-        return sorted(cities)
+        
+        all_cities = [d.name for d in cities_dir.iterdir() if d.is_dir()]
+        
+        # Exclude specific cities from validation set only
+        if self.split == 'val':
+            excluded_cities = set(get_excluded_cities())
+            all_cities = [city for city in all_cities if city not in excluded_cities]
+            print(f"Excluded {len(excluded_cities)} cities from validation set")
+        
+        return sorted(all_cities)
     
     def _get_available_tiles(self, city: str) -> Dict[Tuple[int, int], bool]:
         """Get all available tile positions for a city"""
