@@ -755,6 +755,9 @@ class LandsatDataModule(pl.LightningDataModule):
         self.dataset_root = dataset_root
         self.batch_size = batch_size
         self.num_workers = num_workers
+        if input_sequence_length < 3:
+            print("Warning: input_sequence_length should be at least 3, setting input sequence length to 3")
+            input_sequence_length = 3
         self.input_sequence_length = input_sequence_length
         self.output_sequence_length = output_sequence_length
         self.train_years = train_years
