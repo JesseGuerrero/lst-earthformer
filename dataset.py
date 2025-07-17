@@ -83,7 +83,7 @@ class LandsatSequenceDataset(Dataset):
         Dataset for Landsat sequence prediction using tiled data with year-based splits
         """
         self.dataset_root = Path(dataset_root)
-        self.cluster = cluster,
+        self.cluster = cluster
         self.input_sequence_length = input_sequence_length
         self.output_sequence_length = output_sequence_length
         self.total_sequence_length = input_sequence_length + output_sequence_length
