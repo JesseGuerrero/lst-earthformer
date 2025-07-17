@@ -736,10 +736,10 @@ class LandsatLSTPredictor(pl.LightningModule):
                             f'Input Length: {input_len}, Output Length: {output_len}', fontsize=12)
                 plt.tight_layout()
                 
-                # Log directly to wandb (this should work in sweeps)
+                # FIXED: Log directly to wandb WITHOUT specifying step
                 wandb.log({
                     "test_predictions": wandb.Image(fig)
-                }, step=self.global_step)
+                })  # Removed step parameter to let wandb auto-increment
                 
                 plt.close(fig)
                 print(f"✅ Successfully logged test image at batch {batch_idx}")
