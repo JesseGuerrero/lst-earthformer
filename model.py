@@ -609,7 +609,6 @@ class LandsatLSTPredictor(pl.LightningModule):
         return loss
     
     def configure_optimizers(self):
-        """Configure optimizers"""
         optimizer = torch.optim.AdamW(
             self.parameters(),
             lr=self.hparams.learning_rate,
@@ -617,4 +616,17 @@ class LandsatLSTPredictor(pl.LightningModule):
             betas=(0.9, 0.999)
         )
         
-        return optimizer
+        # Add gradient clipping based on model size
+        model_size = getattr(self.hparams, 'model_size', 'small')
+        if model_size == "tiny":
+            grad_clip_val = 0.5
+        elif model_size == "small":
+            grad_clip_val = 1.0
+        else:
+            grad_clip_val = 2.0
+        
+        return {
+            "optimizer": optimizer,
+            "gradient_clip_val": grad_clip_val,
+            "gradient_clip_algorithm": "norm"
+        }

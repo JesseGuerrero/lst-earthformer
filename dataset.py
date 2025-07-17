@@ -64,6 +64,7 @@ class LandsatSequenceDataset(Dataset):
     def __init__(
         self, 
         dataset_root: str,
+        cluster: str = "all",
         input_sequence_length: int = 3,
         output_sequence_length: int = 3,
         split: str = 'train',
@@ -82,6 +83,7 @@ class LandsatSequenceDataset(Dataset):
         Dataset for Landsat sequence prediction using tiled data with year-based splits
         """
         self.dataset_root = Path(dataset_root)
+        self.cluster = cluster,
         self.input_sequence_length = input_sequence_length
         self.output_sequence_length = output_sequence_length
         self.total_sequence_length = input_sequence_length + output_sequence_length
@@ -125,7 +127,7 @@ class LandsatSequenceDataset(Dataset):
                   f"({min(self.years)}-{max(self.years)}), {len(self.tile_sequences)} tile sequences")
             
     @staticmethod
-    def _load_sequence_for_cache(sequence_info, dataset_root, band_names):
+    def _load_sequence_for_cache(sequence_info, dataset_root, cluster, band_names):
         """Static method for parallel loading of a single sequence"""
         city, tile_row, tile_col, input_months, output_months = sequence_info
         dataset_root = Path(dataset_root)
@@ -135,7 +137,7 @@ class LandsatSequenceDataset(Dataset):
             input_scenes = []
             for month in input_months:
                 scene = LandsatSequenceDataset._load_scene_tile_static(
-                    dataset_root, city, month, tile_row, tile_col, band_names
+                    dataset_root, cluster, city, month, tile_row, tile_col, band_names
                 )
                 if scene is None:
                     return None
@@ -146,7 +148,7 @@ class LandsatSequenceDataset(Dataset):
             output_scenes = []
             for month in output_months:
                 scene = LandsatSequenceDataset._load_scene_tile_static(
-                    dataset_root, city, month, tile_row, tile_col, band_names
+                    dataset_root, cluster, city, month, tile_row, tile_col, band_names
                 )
                 if scene is None:
                     return None
@@ -161,11 +163,14 @@ class LandsatSequenceDataset(Dataset):
             return None  
               
     @staticmethod
-    def _load_scene_tile_static(dataset_root, city, month, tile_row, tile_col, band_names):
+    def _load_scene_tile_static(dataset_root, cluster, city, month, tile_row, tile_col, band_names):
         """Static version of _load_scene_tile for multiprocessing"""
         try:
             # Get scene path
-            city_dir = dataset_root / "Cities_Tiles" / city
+            if cluster == "all":
+                city_dir = dataset_root / "Cities_Tiles" / city
+            else:
+                city_dir = dataset_root / "Clustered" / cluster / "Cities_Tiles" / city
             monthly_scenes = {}
             
             for scene_dir in city_dir.iterdir():
@@ -453,7 +458,10 @@ class LandsatSequenceDataset(Dataset):
 
     def _get_all_cities(self) -> List[str]:
         """Get all available cities from the tiled dataset"""
-        cities_dir = self.dataset_root / "Cities_Tiles"
+        if self.cluster == "all":
+            cities_dir = self.dataset_root / "Cities_Tiles"
+        else:
+            cities_dir = self.dataset_root / "Clustered" / self.cluster / "Cities_Tiles"
         cities = [d.name for d in cities_dir.iterdir() if d.is_dir()]
         return sorted(cities)
     
@@ -477,7 +485,10 @@ class LandsatSequenceDataset(Dataset):
     
     def _get_monthly_scenes(self, city: str) -> Dict[str, str]:
         """Get one scene per month for a city from tiled data, filtered by years and months"""
-        city_dir = self.dataset_root / "Cities_Tiles" / city
+        if self.cluster == "all":
+            city_dir = self.dataset_root / "Cities_Tiles" / city
+        else:
+            city_dir = self.dataset_root / "Clustered" / self.cluster / "Cities_Tiles" / city        
         if not city_dir.exists():
             return {}
         
@@ -690,6 +701,7 @@ class LandsatDataModule(pl.LightningDataModule):
         debug_year: int = 2014,
         interpolated_scenes_file: str = "interpolated.txt",
         max_input_nodata_pct: float = 0.60,
+        cluster: str = "all",
         limit_train_batches: Optional[float] = None,  # NEW PARAMETER
         limit_val_batches: Optional[float] = None     # NEW PARAMETER
     ):
@@ -708,7 +720,8 @@ class LandsatDataModule(pl.LightningDataModule):
         self.limit_train_batches = limit_train_batches
         self.limit_val_batches = limit_val_batches
         self.max_input_nodata_pct = max_input_nodata_pct
-        
+        self.cluster = cluster
+
     def setup(self, stage: Optional[str] = None):
         """Setup datasets for each stage with interpolated scene filtering"""
         if self.limit_train_batches == 1:
@@ -720,6 +733,7 @@ class LandsatDataModule(pl.LightningDataModule):
         if stage == "fit" or stage is None:
             self.train_dataset = LandsatSequenceDataset(
                 self.dataset_root,
+                cluster=self.cluster,
                 input_sequence_length=self.input_sequence_length,
                 output_sequence_length=self.output_sequence_length,
                 split='train',
@@ -735,6 +749,7 @@ class LandsatDataModule(pl.LightningDataModule):
             
             self.val_dataset = LandsatSequenceDataset(
                 self.dataset_root,
+                cluster=self.cluster,
                 input_sequence_length=self.input_sequence_length,
                 output_sequence_length=self.output_sequence_length,
                 split='val',
@@ -752,6 +767,7 @@ class LandsatDataModule(pl.LightningDataModule):
         if stage == "test" or stage is None:
             self.test_dataset = LandsatSequenceDataset(
                 self.dataset_root,
+                cluster=self.cluster,
                 input_sequence_length=self.input_sequence_length,
                 output_sequence_length=self.output_sequence_length,
                 split='test',
