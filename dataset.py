@@ -14,6 +14,11 @@ from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
 from functools import partial
 import multiprocessing as mp
+import pandas as pd
+import numpy as np
+from dateutil.relativedelta import relativedelta
+import pickle
+import hashlib
 
 BAND_RANGES = {
     "red": {"min": 1.0, "max": 10000.0},
@@ -258,6 +263,71 @@ class LandsatSequenceDataset(Dataset):
             print(f"No interpolated scenes affect years in this split: {sorted(self.years)}")
         print(f"{'='*50}")
     
+    def _get_cache_filename(self) -> str:
+        """Generate a unique cache filename based on dataset parameters"""
+        
+        # Get the year sets (they're stored as self.years, but we need the original splits)
+        if hasattr(self, 'train_years'):
+            train_years = sorted(list(self.train_years)) if self.train_years else None
+        else:
+            train_years = None
+            
+        if hasattr(self, 'val_years'):
+            val_years = sorted(list(self.val_years)) if self.val_years else None
+        else:
+            val_years = None
+            
+        if hasattr(self, 'test_years'):
+            test_years = sorted(list(self.test_years)) if self.test_years else None
+        else:
+            test_years = None
+        
+        # Create a hash of the configuration - MUST match setup_data.py exactly
+        config_str = f"{self.split}_{self.cluster}_{self.input_sequence_length}_{self.output_sequence_length}"
+        config_str += f"_{train_years}_{val_years}_{test_years}"
+        config_str += f"_{self.debug_monthly_split}_{self.debug_year}_{self.max_input_nodata_pct}"
+        
+        print(f"🔍 Cache config string: {config_str}")
+        
+        config_hash = hashlib.md5(config_str.encode()).hexdigest()[:8]
+        
+        cache_dir = self.dataset_root / "sequence_cache"
+        cache_filename = str(cache_dir / f"sequences_{self.split}_{self.cluster}_{config_hash}.pkl")
+        
+        print(f"🔍 Looking for cache file: {cache_filename}")
+        
+        return cache_filename
+
+    def _load_sequences_from_cache(self) -> Optional[List[Tuple[str, int, int, List[str], List[str]]]]:
+        """Try to load sequences from cache"""
+        cache_file = self._get_cache_filename()
+        
+        if not os.path.exists(cache_file):
+            print(f"❌ Cache file not found: {os.path.basename(cache_file)}")
+            print(f"   Full path: {cache_file}")
+            
+            # List what cache files DO exist
+            cache_dir = os.path.dirname(cache_file)
+            if os.path.exists(cache_dir):
+                existing_files = [f for f in os.listdir(cache_dir) if f.endswith('.pkl')]
+                print(f"   Existing cache files: {existing_files}")
+            else:
+                print(f"   Cache directory doesn't exist: {cache_dir}")
+            
+            return None
+        
+        try:
+            print(f"📂 Loading cache: {os.path.basename(cache_file)}")
+            with open(cache_file, 'rb') as f:
+                sequences = pickle.load(f)
+            
+            print(f"✅ Loaded {len(sequences)} sequences from cache")
+            return sequences
+            
+        except Exception as e:
+            print(f"⚠️ Failed to load cache ({e}), building sequences...")
+            return None
+
     def _is_scene_interpolated(self, city: str, scene_date: str) -> bool:
         """
         Check if a scene is in the interpolated scenes list
@@ -291,55 +361,165 @@ class LandsatSequenceDataset(Dataset):
         
         return normalized_scene
     
+    def _generate_consecutive_sequences(self, city: str, tile_row: int, tile_col: int, 
+                                    sorted_months: List[str], monthly_scenes: Dict[str, str]) -> List[Tuple]:
+        """Generate sequences with strict consecutive month requirement (original logic for val/test)"""
+        sequences = []
+        
+        for i in range(len(sorted_months) - self.total_sequence_length + 1):
+            input_months = sorted_months[i:i + self.input_sequence_length]
+            output_months = sorted_months[i + self.input_sequence_length:i + self.total_sequence_length]
+            
+            if self._are_consecutive_months(input_months + output_months):
+                if self._verify_tile_sequence_exists(city, tile_row, tile_col, input_months + output_months):
+                    
+                    # Check if any output scenes are interpolated
+                    has_interpolated_output = False
+                    for month in output_months:
+                        scene_path = monthly_scenes[month]
+                        scene_dir = Path(scene_path)
+                        scene_date = scene_dir.name
+                        
+                        if self._is_scene_interpolated(city, scene_date):
+                            has_interpolated_output = True
+                            break
+                    
+                    # Check if any output scenes have NODATA in LST
+                    has_nodata_output = False
+                    if not has_interpolated_output:
+                        for month in output_months:
+                            if self._has_nodata_in_lst_tile(city, month, tile_row, tile_col, monthly_scenes):
+                                has_nodata_output = True
+                                break
+                    
+                    # Check if input sequence has excessive NODATA
+                    has_excessive_input_nodata = False
+                    if not has_interpolated_output and not has_nodata_output:
+                        avg_nodata_pct = self._calculate_average_input_nodata(city, input_months, tile_row, tile_col, monthly_scenes)
+                        if avg_nodata_pct > self.max_input_nodata_pct:
+                            has_excessive_input_nodata = True
+                    
+                    # Only include sequence if passes all filters
+                    if not has_interpolated_output and not has_nodata_output and not has_excessive_input_nodata:
+                        sequences.append((city, tile_row, tile_col, input_months, output_months))
+        
+        return sequences
+
+    def _generate_interpolated_sequences(self, city: str, tile_row: int, tile_col: int, 
+                                    sorted_months: List[str], monthly_scenes: Dict[str, str]) -> List[Tuple]:
+        """Generate sequences for training with interpolation for missing months"""
+        sequences = []
+        
+        # Convert months to datetime for easier manipulation
+        month_dates = []
+        for month_str in sorted_months:
+            year, month = map(int, month_str.split('-'))
+            month_dates.append(datetime(year, month, 1))
+        
+        # Find all possible consecutive month spans that could work with interpolation
+        min_date = month_dates[0]
+        max_date = month_dates[-1]
+        
+        # Generate all possible starting points for sequences
+        current_start = min_date
+        while current_start <= max_date:
+            # Calculate end date for this sequence
+            sequence_end = current_start + relativedelta(months=self.total_sequence_length - 1)
+            
+            if sequence_end > max_date:
+                break
+            
+            # Generate all months in this sequence
+            sequence_months = []
+            current_month = current_start
+            for _ in range(self.total_sequence_length):
+                month_str = f"{current_month.year}-{current_month.month:02d}"
+                sequence_months.append(month_str)
+                current_month += relativedelta(months=1)
+            
+            input_months = sequence_months[:self.input_sequence_length]
+            output_months = sequence_months[self.input_sequence_length:]
+            
+            # Count how many of these months actually exist
+            existing_input_months = [m for m in input_months if m in monthly_scenes]
+            existing_output_months = [m for m in output_months if m in monthly_scenes]
+            
+            # Require at least 2 months in input sequence
+            if len(existing_input_months) < 2:
+                current_start += relativedelta(months=1)
+                continue
+            
+            # Check tile existence for existing months only
+            all_months_with_tiles = existing_input_months + existing_output_months
+            if not self._verify_tile_sequence_exists(city, tile_row, tile_col, all_months_with_tiles):
+                current_start += relativedelta(months=1)
+                continue
+            
+            # Check interpolated scene filtering for output months
+            has_interpolated_output = False
+            for month in existing_output_months:
+                scene_path = monthly_scenes[month]
+                scene_dir = Path(scene_path)
+                scene_date = scene_dir.name
+                
+                if self._is_scene_interpolated(city, scene_date):
+                    has_interpolated_output = True
+                    break
+            
+            if has_interpolated_output:
+                current_start += relativedelta(months=1)
+                continue
+            
+            # Check NODATA in existing output months
+            has_nodata_output = False
+            for month in existing_output_months:
+                if self._has_nodata_in_lst_tile(city, month, tile_row, tile_col, monthly_scenes):
+                    has_nodata_output = True
+                    break
+            
+            if has_nodata_output:
+                current_start += relativedelta(months=1)
+                continue
+            
+            # Check excessive NODATA in existing input months
+            if existing_input_months:
+                avg_nodata_pct = self._calculate_average_input_nodata(city, existing_input_months, tile_row, tile_col, monthly_scenes)
+                if avg_nodata_pct > self.max_input_nodata_pct:
+                    current_start += relativedelta(months=1)
+                    continue
+            
+            # This sequence passes all checks - add it
+            sequences.append((city, tile_row, tile_col, input_months, output_months))
+            current_start += relativedelta(months=1)
+        
+        return sequences
+
     def _process_single_city(self, city: str) -> List[Tuple[str, int, int, List[str], List[str]]]:
-        """Process a single city and return its sequences, filtering out those with interpolated ground truth, NODATA in outputs, or >60% average NODATA in inputs"""
+        """Process a single city and return its sequences, with relaxed requirements for training split"""
         city_sequences = []
         
         available_tiles = self._get_available_tiles(city)
         monthly_scenes = self._get_monthly_scenes(city)
         
-        if len(monthly_scenes) < self.total_sequence_length:
+        # Different minimum requirements based on split
+        min_required_scenes = 2 if self.split == 'train' else self.total_sequence_length
+        
+        if len(monthly_scenes) < min_required_scenes:
             return city_sequences
         
         sorted_months = sorted(monthly_scenes.keys())
         
         for (tile_row, tile_col) in available_tiles.keys():
-            for i in range(len(sorted_months) - self.total_sequence_length + 1):
-                input_months = sorted_months[i:i + self.input_sequence_length]
-                output_months = sorted_months[i + self.input_sequence_length:i + self.total_sequence_length]
-                
-                if self._are_consecutive_months(input_months + output_months):
-                    if self._verify_tile_sequence_exists(city, tile_row, tile_col, input_months + output_months):
-                        
-                        # Check if any output scenes are interpolated
-                        has_interpolated_output = False
-                        for month in output_months:
-                            scene_path = monthly_scenes[month]
-                            scene_dir = Path(scene_path)
-                            scene_date = scene_dir.name  # e.g., "2013-12-15T12:00:00Z"
-                            
-                            if self._is_scene_interpolated(city, scene_date):
-                                has_interpolated_output = True
-                                break
-                        
-                        # Check if any output scenes have NODATA in LST
-                        has_nodata_output = False
-                        if not has_interpolated_output:  # Only check if not already filtered out
-                            for month in output_months:
-                                if self._has_nodata_in_lst_tile(city, month, tile_row, tile_col, monthly_scenes):
-                                    has_nodata_output = True
-                                    break
-                        
-                        # NEW: Check if input sequence has >60% average NODATA across all bands
-                        has_excessive_input_nodata = False
-                        if not has_interpolated_output and not has_nodata_output:
-                            avg_nodata_pct = self._calculate_average_input_nodata(city, input_months, tile_row, tile_col, monthly_scenes)
-                            if avg_nodata_pct > self.max_input_nodata_pct:  # Use configurable threshold
-                                has_excessive_input_nodata = True
-                        
-                        # Only include sequence if passes all filters
-                        if not has_interpolated_output and not has_nodata_output and not has_excessive_input_nodata:
-                            city_sequences.append((city, tile_row, tile_col, input_months, output_months))
+            # For training: allow sequences with minimum 2 scenes and interpolate missing ones
+            if self.split == 'train':
+                city_sequences.extend(self._generate_interpolated_sequences(
+                    city, tile_row, tile_col, sorted_months, monthly_scenes
+                ))
+            else:
+                # For val/test: use original strict consecutive requirement
+                city_sequences.extend(self._generate_consecutive_sequences(
+                    city, tile_row, tile_col, sorted_months, monthly_scenes
+                ))
         
         return city_sequences
 
@@ -456,7 +636,7 @@ class LandsatSequenceDataset(Dataset):
         
         self.allowed_months = None
 
-    def get_excluded_cities():
+    def get_excluded_cities(self):
         """Return list of cities to exclude from validation set"""
         return [
             "Athens-Clarke County unified government balance_GA",
@@ -505,7 +685,7 @@ class LandsatSequenceDataset(Dataset):
         
         # Exclude specific cities from validation set only
         if self.split == 'val':
-            excluded_cities = set(get_excluded_cities())
+            excluded_cities = set(self.get_excluded_cities())
             all_cities = [city for city in all_cities if city not in excluded_cities]
             print(f"Excluded {len(excluded_cities)} cities from validation set")
         
@@ -574,28 +754,48 @@ class LandsatSequenceDataset(Dataset):
         return len(tif_files) > 0
     
     def _build_tile_sequences(self) -> List[Tuple[str, int, int, List[str], List[str]]]:
-        """Build consecutive monthly sequences for each tile position, filtering interpolated ground truth"""
+        """Build consecutive monthly sequences for each tile position, with caching support"""
+        
+        # Try to load from cache first
+        cached_sequences = self._load_sequences_from_cache()
+        if cached_sequences is not None:
+            return cached_sequences
+        
+        print(f"\n🔄 Building tile sequences for {self.split} split (no cache found)...")
+        print(f"💡 Tip: Run 'python setup_data.py' to pre-build caches for faster loading")
+        
         if self.debug_monthly_split:
             month_stats = {month: 0 for month in self.allowed_months}
         else:
             year_stats = {year: 0 for year in self.years}
         
-        print(f"\n🔄 Building tile sequences for {self.split} split using {min(cpu_count(), len(self.cities))} cores...")
         print(f"   Excluding {len(self.interpolated_scenes)} interpolated scenes from ground truth...")
         
-        # Process cities in parallel
-        with Pool(processes=min(cpu_count(), len(self.cities))) as pool:
-            city_results = list(tqdm(
-                pool.imap(self._process_single_city, self.cities),
-                total=len(self.cities),
-                desc=f"Processing cities ({self.split})",
-                unit="city"
-            ))
+        # Check if we should use parallelism
+        is_ddp = os.environ.get('LOCAL_RANK') is not None
+        use_parallel = not is_ddp and len(self.cities) > 5
+        
+        if use_parallel:
+            print(f"   Using {min(cpu_count(), len(self.cities))} cores for parallel processing...")
+            # Process cities in parallel
+            with Pool(processes=min(cpu_count(), len(self.cities))) as pool:
+                city_results = list(tqdm(
+                    pool.imap(self._process_single_city, self.cities),
+                    total=len(self.cities),
+                    desc=f"Processing cities ({self.split})",
+                    unit="city"
+                ))
+        else:
+            reason = "DDP detected" if is_ddp else f"only {len(self.cities)} cities"
+            print(f"   Using sequential processing ({reason})...")
+            city_results = []
+            for city in tqdm(self.cities, desc=f"Processing cities ({self.split})", unit="city"):
+                city_results.append(self._process_single_city(city))
         
         # Flatten results
         sequences = [seq for city_seqs in city_results for seq in city_seqs]
         
-        # Calculate statistics
+        # Calculate statistics (existing code)
         for city, tile_row, tile_col, input_months, output_months in sequences:
             if self.debug_monthly_split:
                 first_month = int(input_months[0].split('-')[1])
@@ -606,7 +806,7 @@ class LandsatSequenceDataset(Dataset):
                 if first_year in year_stats:
                     year_stats[first_year] += 1
         
-        # Print statistics
+        # Print statistics (existing code)
         if self.debug_monthly_split:
             print(f"Sequences by month for {self.split} split (year {self.debug_year}):")
             for month in sorted(month_stats.keys()):
@@ -698,32 +898,100 @@ class LandsatSequenceDataset(Dataset):
         # Stack to (H, W, C)
         scene_data = np.stack(bands, axis=-1)
         return scene_data
+
+    def _load_sequence_with_interpolation(self, city: str, tile_row: int, tile_col: int, 
+                                        months: List[str], monthly_scenes: Dict[str, str], 
+                                        lst_only: bool = False) -> List[np.ndarray]:
+        """Load a sequence of scenes with interpolation for missing months"""
+        scenes = []
+        monthly_scenes_for_city = monthly_scenes
+        
+        # First, load all existing scenes
+        existing_data = {}
+        for month in months:
+            if month in monthly_scenes_for_city:
+                scene = self._load_scene_tile(city, month, tile_row, tile_col)
+                if scene is not None:
+                    normalized_scene = self._normalize_scene(scene)
+                    if lst_only:
+                        normalized_scene = normalized_scene[:, :, 1:2]  # LST band only
+                    existing_data[month] = normalized_scene
+        
+        # If we have all the data, return it directly
+        if len(existing_data) == len(months):
+            return [existing_data[month] for month in months]
+        
+        # If training split and missing some months, interpolate
+        if self.split == 'train' and len(existing_data) >= 2:
+            return self._interpolate_missing_scenes(months, existing_data, lst_only)
+        
+        # If not enough data for interpolation, return None (this shouldn't happen due to filtering)
+        return None
+
+    def _interpolate_missing_scenes(self, months: List[str], existing_data: Dict[str, np.ndarray], 
+                                lst_only: bool = False) -> List[np.ndarray]:
+        """Interpolate missing scenes using pandas linear interpolation"""
+        # Convert month strings to datetime for proper ordering
+        month_dates = []
+        for month_str in months:
+            year, month = map(int, month_str.split('-'))
+            month_dates.append(datetime(year, month, 1))
+        
+        # Get the shape from existing data
+        sample_scene = next(iter(existing_data.values()))
+        height, width, channels = sample_scene.shape
+        
+        # Initialize output array
+        interpolated_scenes = []
+        
+        # For each pixel location and channel, create a time series and interpolate
+        for h in range(height):
+            for w in range(width):
+                for c in range(channels):
+                    # Create pandas Series with existing values
+                    time_series_data = {}
+                    for month_str, scene_data in existing_data.items():
+                        year, month = map(int, month_str.split('-'))
+                        month_date = datetime(year, month, 1)
+                        time_series_data[month_date] = scene_data[h, w, c]
+                    
+                    # Create Series and interpolate
+                    series = pd.Series(time_series_data)
+                    series = series.reindex(month_dates)
+                    interpolated_series = series.interpolate(method='linear', limit_direction='both')
+                    
+                    # Store interpolated values
+                    for i, month_date in enumerate(month_dates):
+                        if i == 0:  # Initialize scene array on first pixel
+                            if len(interpolated_scenes) <= i:
+                                interpolated_scenes.append(np.zeros((height, width, channels), dtype=np.float32))
+                        elif len(interpolated_scenes) <= i:
+                            interpolated_scenes.append(np.zeros((height, width, channels), dtype=np.float32))
+                        
+                        interpolated_scenes[i][h, w, c] = interpolated_series[month_date]
+        
+        return interpolated_scenes
     
     def __len__(self) -> int:
         return len(self.tile_sequences)
     
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Returns cached data if available, otherwise loads from disk"""
+        """Returns cached data if available, otherwise loads from disk with interpolation for training"""
         if self.cached_data is not None:
             return self.cached_data[idx]
         
-        # Fallback to original disk loading
         city, tile_row, tile_col, input_months, output_months = self.tile_sequences[idx]
+        monthly_scenes = self._get_monthly_scenes(city)
         
-        # Load input sequence
-        input_scenes = []
-        for month in input_months:
-            scene = self._load_scene_tile(city, month, tile_row, tile_col)
-            normalized_scene = self._normalize_scene(scene)
-            input_scenes.append(normalized_scene)
+        # Load input sequence with interpolation if needed
+        input_scenes = self._load_sequence_with_interpolation(
+            city, tile_row, tile_col, input_months, monthly_scenes
+        )
         
-        # Load output sequence
-        output_scenes = []
-        for month in output_months:
-            scene = self._load_scene_tile(city, month, tile_row, tile_col)
-            normalized_scene = self._normalize_scene(scene)
-            lst_only = normalized_scene[:, :, 1:2]
-            output_scenes.append(lst_only)
+        # Load output sequence with interpolation if needed
+        output_scenes = self._load_sequence_with_interpolation(
+            city, tile_row, tile_col, output_months, monthly_scenes, lst_only=True
+        )
         
         # Convert to tensors
         input_tensor = torch.from_numpy(np.stack(input_scenes, axis=0))
