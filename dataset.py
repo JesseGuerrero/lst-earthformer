@@ -170,6 +170,7 @@ class LandsatSequenceDataset(Dataset):
         
         return normalized_scene
     
+
     def _generate_consecutive_sequences(self, city: str, tile_row: int, tile_col: int, 
                                     sorted_months: List[str], monthly_scenes: Dict[str, str]) -> List[Tuple]:
         """Generate sequences with strict consecutive month requirement"""
@@ -202,106 +203,22 @@ class LandsatSequenceDataset(Dataset):
         
         return sequences
 
-    def _generate_interpolated_sequences(self, city: str, tile_row: int, tile_col: int, 
-                                    sorted_months: List[str], monthly_scenes: Dict[str, str]) -> List[Tuple]:
-        """Generate sequences for training with interpolation for missing months"""
-        sequences = []
-        
-        # Convert months to datetime for easier manipulation
-        month_dates = []
-        for month_str in sorted_months:
-            year, month = map(int, month_str.split('-'))
-            month_dates.append(datetime(year, month, 1))
-        
-        # Find all possible consecutive month spans that could work with interpolation
-        min_date = month_dates[0]
-        max_date = month_dates[-1]
-        
-        # Generate all possible starting points for sequences
-        current_start = min_date
-        while current_start <= max_date:
-            # Calculate end date for this sequence
-            sequence_end = current_start + relativedelta(months=self.total_sequence_length - 1)
-            
-            if sequence_end > max_date:
-                break
-            
-            # Generate all months in this sequence
-            sequence_months = []
-            current_month = current_start
-            for _ in range(self.total_sequence_length):
-                month_str = f"{current_month.year}-{current_month.month:02d}"
-                sequence_months.append(month_str)
-                current_month += relativedelta(months=1)
-            
-            input_months = sequence_months[:self.input_sequence_length]
-            output_months = sequence_months[self.input_sequence_length:]
-            
-            # Count how many of these months actually exist
-            existing_input_months = [m for m in input_months if m in monthly_scenes]
-            existing_output_months = [m for m in output_months if m in monthly_scenes]
-            
-            # Require at least 2 months in input sequence
-            if len(existing_input_months) < 2:
-                current_start += relativedelta(months=1)
-                continue
-            
-            # Check tile existence for existing months only
-            all_months_with_tiles = existing_input_months + existing_output_months
-            if not self._verify_tile_sequence_exists(city, tile_row, tile_col, all_months_with_tiles):
-                current_start += relativedelta(months=1)
-                continue
-            
-            # Check NODATA in existing output months
-            has_nodata_output = False
-            for month in existing_output_months:
-                if self._has_nodata_in_lst_tile(city, month, tile_row, tile_col, monthly_scenes):
-                    has_nodata_output = True
-                    break
-            
-            if has_nodata_output:
-                current_start += relativedelta(months=1)
-                continue
-            
-            # Check excessive NODATA in existing input months
-            if existing_input_months:
-                avg_nodata_pct = self._calculate_average_input_nodata(city, existing_input_months, tile_row, tile_col, monthly_scenes)
-                if avg_nodata_pct > self.max_input_nodata_pct:
-                    current_start += relativedelta(months=1)
-                    continue
-            
-            # This sequence passes all checks - add it
-            sequences.append((city, tile_row, tile_col, input_months, output_months))
-            current_start += relativedelta(months=1)
-        
-        return sequences
-
     def _process_single_city(self, city: str) -> List[Tuple[str, int, int, List[str], List[str]]]:
-        """Process a single city and return its sequences, with relaxed requirements for training split"""
+        """Process a single city and return its sequences"""
         city_sequences = []
         
         available_tiles = self._get_available_tiles(city)
         monthly_scenes = self._get_monthly_scenes(city)
         
-        # Different minimum requirements based on split
-        min_required_scenes = 2 if self.split == 'train' else self.total_sequence_length
-        
-        if len(monthly_scenes) < min_required_scenes:
+        if len(monthly_scenes) < self.total_sequence_length:
             return city_sequences
         
         sorted_months = sorted(monthly_scenes.keys())
         
         for (tile_row, tile_col) in available_tiles.keys():
-            # For training: allow sequences with minimum 2 scenes and interpolate missing ones
-            if self.split == 'train':
-                city_sequences.extend(self._generate_interpolated_sequences(
-                    city, tile_row, tile_col, sorted_months, monthly_scenes
-                ))
-            else:
-                # For val/test: use original strict consecutive requirement
-                city_sequences.extend(self._generate_consecutive_sequences(
-                    city, tile_row, tile_col, sorted_months, monthly_scenes
-                ))
+            city_sequences.extend(self._generate_consecutive_sequences(
+                city, tile_row, tile_col, sorted_months, monthly_scenes
+            ))
         
         return city_sequences
 
@@ -678,105 +595,43 @@ class LandsatSequenceDataset(Dataset):
         # Stack to (H, W, C)
         scene_data = np.stack(bands, axis=-1)
         return scene_data
-
-    def _load_sequence_with_interpolation(self, city: str, tile_row: int, tile_col: int, 
-                                        months: List[str], monthly_scenes: Dict[str, str], 
-                                        lst_only: bool = False) -> List[np.ndarray]:
-        """Load a sequence of scenes with interpolation for missing months"""
-        scenes = []
-        monthly_scenes_for_city = monthly_scenes
-        
-        # First, load all existing scenes
-        existing_data = {}
-        for month in months:
-            if month in monthly_scenes_for_city:
-                scene = self._load_scene_tile(city, month, tile_row, tile_col)
-                if scene is not None:
-                    normalized_scene = self._normalize_scene(scene)
-                    if lst_only:
-                        normalized_scene = normalized_scene[:, :, 1:2]  # LST band only
-                    existing_data[month] = normalized_scene
-        
-        # If we have all the data, return it directly
-        if len(existing_data) == len(months):
-            return [existing_data[month] for month in months]
-        
-        # If training split and missing some months, interpolate
-        if self.split == 'train' and len(existing_data) >= 2:
-            return self._interpolate_missing_scenes(months, existing_data, lst_only)
-        
-        # If not enough data for interpolation, return None (this shouldn't happen due to filtering)
-        return None
-
-    def _interpolate_missing_scenes(self, months: List[str], existing_data: Dict[str, np.ndarray], 
-                                lst_only: bool = False) -> List[np.ndarray]:
-        """Interpolate missing scenes using pandas linear interpolation"""
-        # Convert month strings to datetime for proper ordering
-        month_dates = []
-        for month_str in months:
-            year, month = map(int, month_str.split('-'))
-            month_dates.append(datetime(year, month, 1))
-        
-        # Get the shape from existing data
-        sample_scene = next(iter(existing_data.values()))
-        height, width, channels = sample_scene.shape
-        
-        # Initialize output array
-        interpolated_scenes = []
-        
-        # For each pixel location and channel, create a time series and interpolate
-        for h in range(height):
-            for w in range(width):
-                for c in range(channels):
-                    # Create pandas Series with existing values
-                    time_series_data = {}
-                    for month_str, scene_data in existing_data.items():
-                        year, month = map(int, month_str.split('-'))
-                        month_date = datetime(year, month, 1)
-                        time_series_data[month_date] = scene_data[h, w, c]
-                    
-                    # Create Series and interpolate
-                    series = pd.Series(time_series_data)
-                    series = series.reindex(month_dates)
-                    interpolated_series = series.interpolate(method='linear', limit_direction='both')
-                    
-                    # Store interpolated values
-                    for i, month_date in enumerate(month_dates):
-                        if i == 0:  # Initialize scene array on first pixel
-                            if len(interpolated_scenes) <= i:
-                                interpolated_scenes.append(np.zeros((height, width, channels), dtype=np.float32))
-                        elif len(interpolated_scenes) <= i:
-                            interpolated_scenes.append(np.zeros((height, width, channels), dtype=np.float32))
-                        
-                        interpolated_scenes[i][h, w, c] = interpolated_series[month_date]
-        
-        return interpolated_scenes
     
     def __len__(self) -> int:
         return len(self.tile_sequences)
     
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-
+        """Load sequence data directly"""
         city, tile_row, tile_col, input_months, output_months = self.tile_sequences[idx]
         monthly_scenes = self._get_monthly_scenes(city)
         
-        # Load input sequence with interpolation if needed
-        input_scenes = self._load_sequence_with_interpolation(
-            city, tile_row, tile_col, input_months, monthly_scenes
-        )
+        # Load input sequence
+        input_scenes = []
+        for month in input_months:
+            scene = self._load_scene_tile(city, month, tile_row, tile_col)
+            if scene is None:
+                # Return zeros as fallback
+                print(f"Warning: Failed to load input scene {city} {month} tile({tile_row},{tile_col})")
+                input_tensor = torch.zeros(self.input_sequence_length, 128, 128, 9)
+                target_tensor = torch.zeros(self.output_sequence_length, 128, 128, 1)
+                return input_tensor, target_tensor
+            
+            normalized_scene = self._normalize_scene(scene)
+            input_scenes.append(normalized_scene)
         
-        # Load output sequence with interpolation if needed
-        output_scenes = self._load_sequence_with_interpolation(
-            city, tile_row, tile_col, output_months, monthly_scenes, lst_only=True
-        )
-        
-        # Handle case where interpolation fails
-        if input_scenes is None or output_scenes is None:
-            # Return zeros as fallback (this should rarely happen due to filtering)
-            print(f"Warning: Failed to load sequence {city} tile({tile_row},{tile_col})")
-            input_tensor = torch.zeros(self.input_sequence_length, 128, 128, 9)
-            target_tensor = torch.zeros(self.output_sequence_length, 128, 128, 1)
-            return input_tensor, target_tensor
+        # Load output sequence
+        output_scenes = []
+        for month in output_months:
+            scene = self._load_scene_tile(city, month, tile_row, tile_col)
+            if scene is None:
+                # Return zeros as fallback
+                print(f"Warning: Failed to load output scene {city} {month} tile({tile_row},{tile_col})")
+                input_tensor = torch.zeros(self.input_sequence_length, 128, 128, 9)
+                target_tensor = torch.zeros(self.output_sequence_length, 128, 128, 1)
+                return input_tensor, target_tensor
+            
+            normalized_scene = self._normalize_scene(scene)
+            lst_only = normalized_scene[:, :, 1:2]  # LST band only
+            output_scenes.append(lst_only)
         
         # Convert to tensors
         input_tensor = torch.from_numpy(np.stack(input_scenes, axis=0))
