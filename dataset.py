@@ -790,8 +790,8 @@ class LandsatSequenceDataset(Dataset):
         if len(existing_data) == len(months):
             return [existing_data[month] for month in months]
         
-        # If training split and missing some months, interpolate
-        if self.split == 'train' and len(existing_data) >= 2:
+        # If training split and missing some months, interpolate '''self.split == 'train' and'''
+        if len(existing_data) >= 2: 
             return self._interpolate_missing_scenes(months, existing_data, lst_only)
         
         # If not enough data for interpolation, return None (this shouldn't happen due to filtering)
