@@ -60,8 +60,6 @@ class LandsatSequenceDataset(Dataset):
         self.debug_monthly_split = debug_monthly_split
         self.debug_year = debug_year
         self._scene_validation_cache = {}
-        self.cached_data = None
-        self.cached_tiles = {}  # Cache for individual tiles
         self.max_input_nodata_pct = max_input_nodata_pct
         
         if debug_monthly_split:
@@ -87,106 +85,6 @@ class LandsatSequenceDataset(Dataset):
         else:
             print(f"{split} split: {len(self.cities)} cities, {len(self.years)} years "
                 f"({min(self.years)}-{max(self.years)}), {len(self.tile_sequences)} tile sequences")
-            
-    @staticmethod
-    def _load_sequence_for_cache(sequence_info, dataset_root, cluster, band_names):
-        """Static method for parallel loading of a single sequence"""
-        city, tile_row, tile_col, input_months, output_months = sequence_info
-        dataset_root = Path(dataset_root)
-        
-        try:
-            # Load input sequence
-            input_scenes = []
-            for month in input_months:
-                scene = LandsatSequenceDataset._load_scene_tile_static(
-                    dataset_root, cluster, city, month, tile_row, tile_col, band_names
-                )
-                if scene is None:
-                    return None
-                normalized_scene = LandsatSequenceDataset._normalize_scene_static(scene, band_names)
-                input_scenes.append(normalized_scene)
-            
-            # Load output sequence
-            output_scenes = []
-            for month in output_months:
-                scene = LandsatSequenceDataset._load_scene_tile_static(
-                    dataset_root, cluster, city, month, tile_row, tile_col, band_names
-                )
-                if scene is None:
-                    return None
-                normalized_scene = LandsatSequenceDataset._normalize_scene_static(scene, band_names)
-                lst_only = normalized_scene[:, :, 1:2]  # LST band only
-                output_scenes.append(lst_only)
-            
-            return input_scenes, output_scenes
-            
-        except Exception as e:
-            print(f"Error loading sequence {city} {tile_row},{tile_col}: {e}")
-            return None  
-              
-    @staticmethod
-    def _load_scene_tile_static(dataset_root, cluster, city, month, tile_row, tile_col, band_names):
-        """Static version of _load_scene_tile for multiprocessing"""
-        try:
-            # Get scene path
-            if cluster == "all":
-                city_dir = dataset_root / "Cities_Tiles" / city
-            else:
-                city_dir = dataset_root / "Clustered" / cluster / "Cities_Tiles" / city
-            monthly_scenes = {}
-            
-            for scene_dir in city_dir.iterdir():
-                if scene_dir.is_dir():
-                    date_obj = datetime.fromisoformat(scene_dir.name.replace('Z', '+00:00'))
-                    month_key = f"{date_obj.year}-{date_obj.month:02d}"
-                    if month_key == month:
-                        monthly_scenes[month] = str(scene_dir)
-                        break
-            
-            if month not in monthly_scenes:
-                return None
-                
-            scene_dir = Path(monthly_scenes[month])
-            
-            # Load DEM
-            dem_path = dataset_root / "DEM_2014_Tiles" / city / f"DEM_row_{tile_row:03d}_col_{tile_col:03d}.tif"
-            with rasterio.open(dem_path) as src:
-                dem = src.read(1).astype(np.float32)
-                if src.nodata is not None:
-                    dem[dem == src.nodata] = 0
-            
-            # Load other bands
-            bands = [dem]
-            for band_name in band_names[1:]:  # Skip DEM
-                tile_path = scene_dir / f"{band_name}_row_{tile_row:03d}_col_{tile_col:03d}.tif"
-                with rasterio.open(tile_path) as src:
-                    band_data = src.read(1).astype(np.float32)
-                    if src.nodata is not None:
-                        band_data[band_data == src.nodata] = 0
-                    bands.append(band_data)
-            
-            return np.stack(bands, axis=-1)
-            
-        except Exception:
-            return None
-
-    @staticmethod
-    def _normalize_scene_static(scene_data, band_names):
-        """Static version of _normalize_scene for multiprocessing"""
-        normalized_scene = scene_data.copy()
-        
-        for i, band_name in enumerate(band_names):
-            band_data = scene_data[:, :, i]
-            band_range = BAND_RANGES[band_name]
-            
-            valid_mask = band_data != 0
-            normalized_band = np.zeros_like(band_data, dtype=np.float32)
-            normalized_band[valid_mask] = (band_data[valid_mask] - band_range["min"]) / (band_range["max"] - band_range["min"])
-            normalized_band = np.clip(normalized_band, 0, 1)
-            
-            normalized_scene[:, :, i] = normalized_band
-        
-        return normalized_scene
     
     def _get_cache_filename(self) -> str:
         """Generate a unique cache filename based on dataset parameters"""
@@ -858,10 +756,7 @@ class LandsatSequenceDataset(Dataset):
         return len(self.tile_sequences)
     
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Always load from pickle cache"""
-        if self.cached_data is not None:
-            return self.cached_data[idx]
-        
+
         city, tile_row, tile_col, input_months, output_months = self.tile_sequences[idx]
         monthly_scenes = self._get_monthly_scenes(city)
         
