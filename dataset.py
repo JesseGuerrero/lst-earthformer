@@ -325,7 +325,6 @@ class LandsatSequenceDataset(Dataset):
         available_tiles = self._get_available_tiles(city)
         monthly_scenes = self._get_monthly_scenes(city)
         
-        # Different minimum requirements based on split
         min_required_scenes = 2
         
         if len(monthly_scenes) < min_required_scenes:
@@ -334,19 +333,10 @@ class LandsatSequenceDataset(Dataset):
         sorted_months = sorted(monthly_scenes.keys())
         
         for (tile_row, tile_col) in available_tiles.keys():
-            # For training: allow sequences with minimum 2 scenes and interpolate missing ones
-            if self.split == 'train':
-                city_sequences.extend(self._generate_interpolated_sequences(
-                    city, tile_row, tile_col, sorted_months, monthly_scenes
-                ))
-            else:
-                city_sequences.extend(self._generate_interpolated_sequences(
-                    city, tile_row, tile_col, sorted_months, monthly_scenes
-                ))
-                # For val/test: use original strict consecutive requirement
-                # city_sequences.extend(self._generate_consecutive_sequences(
-                #     city, tile_row, tile_col, sorted_months, monthly_scenes
-                # ))
+            # Allow sequences with minimum 2 scenes and interpolate missing ones
+            city_sequences.extend(self._generate_interpolated_sequences(
+                city, tile_row, tile_col, sorted_months, monthly_scenes
+            ))
         
         return city_sequences
 
@@ -772,8 +762,8 @@ class LandsatSequenceDataset(Dataset):
         return interpolated_scenes
 
     def _load_sequence_with_interpolation(self, city: str, tile_row: int, tile_col: int, 
-                                        months: List[str], monthly_scenes: Dict[str, str], 
-                                        lst_only: bool = False) -> List[np.ndarray]:
+                                    months: List[str], monthly_scenes: Dict[str, str], 
+                                    lst_only: bool = False) -> List[np.ndarray]:
         """Load a sequence of scenes with interpolation for missing months"""
         scenes = []
         monthly_scenes_for_city = monthly_scenes
@@ -782,23 +772,34 @@ class LandsatSequenceDataset(Dataset):
         existing_data = {}
         for month in months:
             if month in monthly_scenes_for_city:
-                scene = self._load_scene_tile(city, month, tile_row, tile_col)
-                if scene is not None:
-                    normalized_scene = self._normalize_scene(scene)
-                    if lst_only:
-                        normalized_scene = normalized_scene[:, :, 1:2]  # LST band only
-                    existing_data[month] = normalized_scene
+                try:
+                    scene = self._load_scene_tile(city, month, tile_row, tile_col)
+                    if scene is not None:
+                        normalized_scene = self._normalize_scene(scene)
+                        if lst_only:
+                            normalized_scene = normalized_scene[:, :, 1:2]  # LST band only
+                        existing_data[month] = normalized_scene
+                except Exception as e:
+                    # Skip months that fail to load (file corruption, etc.)
+                    print(f"Warning: Failed to load {city} {month} tile({tile_row},{tile_col}): {e}")
+                    continue
         
         # If we have all the data, return it directly
         if len(existing_data) == len(months):
             return [existing_data[month] for month in months]
         
-        # If training split and missing some months, interpolate '''self.split == 'train' and'''
+        # If training split and missing some months, interpolate
         if len(existing_data) >= 2: 
             return self._interpolate_missing_scenes(months, existing_data, lst_only)
         
-        # If not enough data for interpolation, return None (this shouldn't happen due to filtering)
-        return None
+        # This should never happen due to filtering - raise error to debug
+        raise ValueError(
+            f"Insufficient data for sequence interpolation: "
+            f"city={city}, tile=({tile_row},{tile_col}), "
+            f"months={months}, existing_months={list(existing_data.keys())}, "
+            f"split={self.split}, lst_only={lst_only}. "
+            f"Expected at least 2 existing months but found {len(existing_data)}."
+        )
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:       
         # Fallback to original disk loading
