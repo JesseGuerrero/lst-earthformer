@@ -288,6 +288,11 @@ class LandsatSequenceDataset(Dataset):
                 current_start += relativedelta(months=1)
                 continue
             
+            # Require at least 1 months in output sequence
+            if len(existing_output_months) < 1:
+                current_start += relativedelta(months=1)
+                continue
+            
             # Check tile existence for existing months only
             all_months_with_tiles = existing_input_months + existing_output_months
             if not self._verify_tile_sequence_exists(city, tile_row, tile_col, all_months_with_tiles):
