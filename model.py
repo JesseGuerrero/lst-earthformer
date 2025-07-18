@@ -271,8 +271,8 @@ class LandsatLSTPredictor(pl.LightningModule):
             temp_mae_f = self.masked_mae(pred_fahrenheit, true_fahrenheit)
             temp_rmse_f = torch.sqrt(self.masked_loss(pred_fahrenheit, true_fahrenheit))
             
-            self.log('train_mae_F', temp_mae_f, on_step=False, on_epoch=True, prog_bar=True)
-            self.log('train_rmse_F', temp_rmse_f, on_step=False, on_epoch=True, prog_bar=True)
+            self.log('train_mae_F', temp_mae_f, on_step=True, on_epoch=True, prog_bar=True)
+            self.log('train_rmse_F', temp_rmse_f, on_step=True, on_epoch=True, prog_bar=True)
         
         return loss
         
@@ -299,8 +299,8 @@ class LandsatLSTPredictor(pl.LightningModule):
             temp_rmse_f = torch.sqrt(self.masked_loss(pred_fahrenheit, true_fahrenheit))
             
             # Log ACTUAL temperature metrics
-            self.log('val_mae_F', temp_mae_f, on_step=False, on_epoch=True, prog_bar=True)
-            self.log('val_rmse_F', temp_rmse_f, on_step=False, on_epoch=True, prog_bar=True)
+            self.log('val_mae_F', temp_mae_f, on_step=True, on_epoch=True, prog_bar=True)
+            self.log('val_rmse_F', temp_rmse_f, on_step=True, on_epoch=True, prog_bar=True)
             
             # Correlation (same in both spaces)
             pred_flat = pred_fahrenheit.flatten()

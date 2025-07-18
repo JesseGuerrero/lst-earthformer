@@ -154,7 +154,7 @@ def train_landsat_model(
     
     early_stopping = EarlyStopping(
         monitor='val_loss',
-        patience=15 if not debug_monthly_split else 10,
+        patience=30 if not debug_monthly_split else 20,
         mode='min',
         verbose=True
     )
@@ -169,7 +169,7 @@ def train_landsat_model(
             gradient_as_bucket_view=True
         )
     else:
-        strategy = None  # Let PyTorch Lightning choose automatically
+        strategy = "auto"  # Let PyTorch Lightning choose automatically
     
     # Create trainer
     trainer = pl.Trainer(
@@ -180,6 +180,7 @@ def train_landsat_model(
         precision=precision,
         accumulate_grad_batches=1,
         val_check_interval=0.25,
+        num_sanity_val_steps=2,
         limit_train_batches=limit_train_batches,
         limit_val_batches=limit_val_batches,
         limit_test_batches=limit_test_batches,
