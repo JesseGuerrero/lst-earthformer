@@ -724,6 +724,50 @@ class LandsatSequenceDataset(Dataset):
     def __len__(self) -> int:
         return len(self.tile_sequences)
     
+    def _interpolate_missing_scenes(self, months: List[str], existing_data: Dict[str, np.ndarray], 
+                                lst_only: bool = False) -> List[np.ndarray]:
+        """Interpolate missing scenes using pandas linear interpolation"""
+        # Convert month strings to datetime for proper ordering
+        month_dates = []
+        for month_str in months:
+            year, month = map(int, month_str.split('-'))
+            month_dates.append(datetime(year, month, 1))
+        
+        # Get the shape from existing data
+        sample_scene = next(iter(existing_data.values()))
+        height, width, channels = sample_scene.shape
+        
+        # Initialize output array
+        interpolated_scenes = []
+        
+        # For each pixel location and channel, create a time series and interpolate
+        for h in range(height):
+            for w in range(width):
+                for c in range(channels):
+                    # Create pandas Series with existing values
+                    time_series_data = {}
+                    for month_str, scene_data in existing_data.items():
+                        year, month = map(int, month_str.split('-'))
+                        month_date = datetime(year, month, 1)
+                        time_series_data[month_date] = scene_data[h, w, c]
+                    
+                    # Create Series and interpolate
+                    series = pd.Series(time_series_data)
+                    series = series.reindex(month_dates)
+                    interpolated_series = series.interpolate(method='linear', limit_direction='both')
+                    
+                    # Store interpolated values
+                    for i, month_date in enumerate(month_dates):
+                        if i == 0:  # Initialize scene array on first pixel
+                            if len(interpolated_scenes) <= i:
+                                interpolated_scenes.append(np.zeros((height, width, channels), dtype=np.float32))
+                        elif len(interpolated_scenes) <= i:
+                            interpolated_scenes.append(np.zeros((height, width, channels), dtype=np.float32))
+                        
+                        interpolated_scenes[i][h, w, c] = interpolated_series[month_date]
+        
+        return interpolated_scenes
+
     def _load_sequence_with_interpolation(self, city: str, tile_row: int, tile_col: int, 
                                         months: List[str], monthly_scenes: Dict[str, str], 
                                         lst_only: bool = False) -> List[np.ndarray]:
