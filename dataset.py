@@ -299,58 +299,35 @@ class LandsatSequenceDataset(Dataset):
         return cache_filename
 
     def _load_sequences_from_cache(self) -> Optional[List[Tuple[str, int, int, List[str], List[str]]]]:
-        """Try to load sequences from cache with flexible matching"""
-        
-        # Try exact cache match first
+        """Try to load sequences from cache"""
         cache_file = self._get_cache_filename()
         
-        if os.path.exists(cache_file):
-            try:
-                print(f"📂 Loading cache: {os.path.basename(cache_file)}")
-                with open(cache_file, 'rb') as f:
-                    sequences = pickle.load(f)
-                
-                print(f"✅ Loaded {len(sequences)} sequences from cache")
-                return sequences
-                
-            except Exception as e:
-                print(f"⚠️ Failed to load cache ({e}), trying fallback...")
-        
-        # FALLBACK: Try to find any compatible cache for this split/cluster
-        cache_dir = self.dataset_root / "sequence_cache"
-        if cache_dir.exists():
-            # Look for any cache file matching this split and cluster
-            pattern = f"sequences_{self.split}_{self.cluster}_*.pkl"
-            potential_caches = list(cache_dir.glob(pattern))
+        if not os.path.exists(cache_file):
+            print(f"❌ Cache file not found: {os.path.basename(cache_file)}")
+            print(f"   Full path: {cache_file}")
             
-            print(f"🔍 Looking for fallback caches matching: {pattern}")
-            print(f"   Found {len(potential_caches)} potential cache files")
+            # List what cache files DO exist
+            cache_dir = os.path.dirname(cache_file)
+            if os.path.exists(cache_dir):
+                existing_files = [f for f in os.listdir(cache_dir) if f.endswith('.pkl')]
+                print(f"   Existing cache files: {existing_files}")
+            else:
+                print(f"   Cache directory doesn't exist: {cache_dir}")
             
-            for cache_path in potential_caches:
-                try:
-                    print(f"🔄 Trying fallback cache: {cache_path.name}")
-                    with open(cache_path, 'rb') as f:
-                        sequences = pickle.load(f)
-                    
-                    # Filter sequences based on current city exclusions
-                    if self.split == 'val':
-                        excluded_cities = set(self.get_excluded_cities())
-                        original_count = len(sequences)
-                        sequences = [seq for seq in sequences if seq[0] not in excluded_cities]
-                        filtered_count = len(sequences)
-                        print(f"📊 Filtered validation sequences: {original_count} → {filtered_count}")
-                        print(f"   (excluded {len(excluded_cities)} cities)")
-                    
-                    print(f"✅ Using fallback cache with {len(sequences)} sequences")
-                    return sequences
-                    
-                except Exception as e:
-                    print(f"   ❌ Failed to load {cache_path.name}: {e}")
-                    continue
+            return None
         
-        print(f"❌ No compatible cache found")
-        return None
-
+        try:
+            print(f"📂 Loading cache: {os.path.basename(cache_file)}")
+            with open(cache_file, 'rb') as f:
+                sequences = pickle.load(f)
+            
+            print(f"✅ Loaded {len(sequences)} sequences from cache")
+            return sequences
+            
+        except Exception as e:
+            print(f"⚠️ Failed to load cache ({e}), building sequences...")
+            return None
+        
     def _is_scene_interpolated(self, city: str, scene_date: str) -> bool:
         """
         Check if a scene is in the interpolated scenes list
