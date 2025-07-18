@@ -275,56 +275,6 @@ class LandsatLSTPredictor(pl.LightningModule):
             self.log('train_rmse_F', temp_rmse_f, on_step=False, on_epoch=True, prog_bar=True)
         
         return loss
-    
-    def debug_image_logging_in_sweep(self, inputs, targets, predictions, stage="debug"):
-        """
-        Debug version of image logging to identify sweep issues
-        """
-        print(f"\n🔍 DEBUG: Image logging called for {stage}")
-        print(f"📊 Logger type: {type(self.logger)}")
-        print(f"🔗 Wandb available: {wandb.run is not None}")
-        
-        if wandb.run:
-            print(f"🏃 Wandb run name: {wandb.run.name}")
-            print(f"📁 Wandb run id: {wandb.run.id}")
-        
-        # Check if logger is WandB
-        if not isinstance(self.logger, pl.loggers.WandbLogger):
-            print(f"❌ Logger is not WandbLogger: {type(self.logger)}")
-            return
-        
-        # Check tensor shapes and types
-        print(f"📐 Input shape: {inputs.shape}, dtype: {inputs.dtype}")
-        print(f"📐 Target shape: {targets.shape}, dtype: {targets.dtype}")
-        print(f"📐 Prediction shape: {predictions.shape}, dtype: {predictions.dtype}")
-        
-        # Check if we're in the right epoch
-        print(f"📅 Current epoch: {self.current_epoch}")
-        print(f"📅 Log every N epochs: {self.log_images_every_n_epochs}")
-        print(f"✅ Should log images: {self.current_epoch % self.log_images_every_n_epochs == 0}")
-        
-        try:
-            # Create a simple test image
-            import matplotlib.pyplot as plt
-            import numpy as np
-            
-            fig, ax = plt.subplots(1, 1, figsize=(6, 4))
-            ax.imshow(np.random.random((64, 64)), cmap='viridis')
-            ax.set_title(f"Debug Image - Epoch {self.current_epoch}")
-            ax.axis('off')
-            
-            # Try to log the test image
-            self.logger.experiment.log({
-                f"debug_test_image_{stage}": wandb.Image(fig)
-            })
-            
-            plt.close(fig)
-            print("✅ Successfully logged debug image!")
-            
-        except Exception as e:
-            print(f"❌ Failed to log debug image: {e}")
-            import traceback
-            traceback.print_exc()
         
     def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
         """Validation step with direct image logging that works in sweeps"""
