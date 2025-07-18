@@ -128,12 +128,20 @@ class LandsatSequenceDataset(Dataset):
         if not os.path.exists(cache_file):
             print(f"❌ Cache file not found: {os.path.basename(cache_file)}")
             print(f"   Full path: {cache_file}")
+            print(f"💡 Run setup_data.py first to build cache:")
+            print(f"   python setup_data.py --dataset_root {self.dataset_root} --cluster {self.cluster} --input_length {self.input_sequence_length} --output_length {self.output_sequence_length}")
+            if not self.debug_monthly_split:
+                print(f"   --train_years {' '.join(map(str, sorted(self.train_years)))} --val_years {' '.join(map(str, sorted(self.val_years)))} --test_years {' '.join(map(str, sorted(self.test_years)))}")
+            else:
+                print(f"   --debug --debug_year {self.debug_year}")
+            print(f"   --max_nodata {self.max_input_nodata_pct}")
             
             # List what cache files DO exist
             cache_dir = os.path.dirname(cache_file)
             if os.path.exists(cache_dir):
                 existing_files = [f for f in os.listdir(cache_dir) if f.endswith('.pkl')]
-                print(f"   Existing cache files: {existing_files}")
+                if existing_files:
+                    print(f"   Existing cache files: {existing_files}")
             else:
                 print(f"   Cache directory doesn't exist: {cache_dir}")
             
@@ -148,7 +156,8 @@ class LandsatSequenceDataset(Dataset):
             return sequences
             
         except Exception as e:
-            print(f"⚠️ Failed to load cache ({e}), building sequences...")
+            print(f"⚠️ Failed to load cache ({e})")
+            print(f"💡 Try rebuilding cache with setup_data.py")
             return None
         
     
@@ -455,67 +464,38 @@ class LandsatSequenceDataset(Dataset):
     def _build_tile_sequences(self) -> List[Tuple[str, int, int, List[str], List[str]]]:
         """Build consecutive monthly sequences for each tile position, with caching support"""
         
-        # Try to load from cache first
+        # ALWAYS try to load from cache first
         cached_sequences = self._load_sequences_from_cache()
         if cached_sequences is not None:
             return cached_sequences
         
-        print(f"\n🔄 Building tile sequences for {self.split} split (no cache found)...")
-        print(f"💡 Tip: Run 'python setup_data.py' to pre-build caches for faster loading")
-        
+        # If no cache found, provide clear instructions
+        print(f"\n❌ No cache found for {self.split} split")
+        print(f"🔧 Current configuration:")
+        print(f"   Dataset root: {self.dataset_root}")
+        print(f"   Cluster: {self.cluster}")
+        print(f"   Split: {self.split}")
+        print(f"   Sequence lengths: {self.input_sequence_length} → {self.output_sequence_length}")
         if self.debug_monthly_split:
-            month_stats = {month: 0 for month in self.allowed_months}
+            print(f"   Debug mode: {self.debug_year}")
         else:
-            year_stats = {year: 0 for year in self.years}
-        
-        # Check if we should use parallelism
-        is_ddp = os.environ.get('LOCAL_RANK') is not None
-        use_parallel = not is_ddp and len(self.cities) > 5
-        
-        if use_parallel:
-            print(f"   Using {min(cpu_count(), len(self.cities))} cores for parallel processing...")
-            # Process cities in parallel
-            with Pool(processes=min(cpu_count(), len(self.cities))) as pool:
-                city_results = list(tqdm(
-                    pool.imap(self._process_single_city, self.cities),
-                    total=len(self.cities),
-                    desc=f"Processing cities ({self.split})",
-                    unit="city"
-                ))
-        else:
-            reason = "DDP detected" if is_ddp else f"only {len(self.cities)} cities"
-            print(f"   Using sequential processing ({reason})...")
-            city_results = []
-            for city in tqdm(self.cities, desc=f"Processing cities ({self.split})", unit="city"):
-                city_results.append(self._process_single_city(city))
-        
-        # Flatten results
-        sequences = [seq for city_seqs in city_results for seq in city_seqs]
-        
-        # Calculate statistics (existing code)
-        for city, tile_row, tile_col, input_months, output_months in sequences:
-            if self.debug_monthly_split:
-                first_month = int(input_months[0].split('-')[1])
-                if first_month in month_stats:
-                    month_stats[first_month] += 1
-            else:
-                first_year = int(input_months[0].split('-')[0])
-                if first_year in year_stats:
-                    year_stats[first_year] += 1
-        
-        # Print statistics (existing code)
+            print(f"   Years: train={sorted(self.train_years)}, val={sorted(self.val_years)}, test={sorted(self.test_years)}")
+        print(f"   Max NODATA: {self.max_input_nodata_pct}")
+        print()
+        print("💡 To build cache, run:")
+        cache_cmd = f"python setup_data.py --dataset_root {self.dataset_root} --cluster {self.cluster}"
+        cache_cmd += f" --input_length {self.input_sequence_length} --output_length {self.output_sequence_length}"
         if self.debug_monthly_split:
-            print(f"Sequences by month for {self.split} split (year {self.debug_year}):")
-            for month in sorted(month_stats.keys()):
-                month_name = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                                'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][month-1]
-                print(f"  {month:02d} ({month_name}): {month_stats[month]} sequences")
+            cache_cmd += f" --debug --debug_year {self.debug_year}"
         else:
-            print(f"Sequences by year for {self.split} split:")
-            for year in sorted(year_stats.keys()):
-                print(f"  {year}: {year_stats[year]} sequences")
+            cache_cmd += f" --train_years {' '.join(map(str, sorted(self.train_years)))}"
+            cache_cmd += f" --val_years {' '.join(map(str, sorted(self.val_years)))}"
+            cache_cmd += f" --test_years {' '.join(map(str, sorted(self.test_years)))}"
+        cache_cmd += f" --max_nodata {self.max_input_nodata_pct}"
+        print(f"   {cache_cmd}")
+        print()
         
-        return sequences
+        raise RuntimeError(f"Cache not found for {self.split} split. Please run setup_data.py first to build cache.")
     
     def _verify_tile_sequence_exists(self, city: str, tile_row: int, tile_col: int, months: List[str]) -> bool:
         """Verify using cached scene validation"""
@@ -684,8 +664,11 @@ class LandsatDataModule(pl.LightningDataModule):
         if self.limit_val_batches == 1:
             self.limit_val_batches = 1.0
         
+        print(f"🔧 Setting up datasets for stage: {stage}")
+        
         # Setup train and val datasets for training
         if stage == "fit" or stage is None:
+            print("📚 Loading training dataset...")
             self.train_dataset = LandsatSequenceDataset(
                 self.dataset_root,
                 cluster=self.cluster,
@@ -701,6 +684,7 @@ class LandsatDataModule(pl.LightningDataModule):
                 max_input_nodata_pct=self.max_input_nodata_pct
             )
             
+            print("📊 Loading validation dataset...")
             self.val_dataset = LandsatSequenceDataset(
                 self.dataset_root,
                 cluster=self.cluster,
@@ -718,6 +702,7 @@ class LandsatDataModule(pl.LightningDataModule):
         
         # Setup test dataset
         if stage == "test" or stage is None:
+            print("🧪 Loading test dataset...")
             self.test_dataset = LandsatSequenceDataset(
                 self.dataset_root,
                 cluster=self.cluster,
@@ -732,7 +717,8 @@ class LandsatDataModule(pl.LightningDataModule):
                 max_input_nodata_pct=self.max_input_nodata_pct,             
                 limit_batches=getattr(self, 'limit_test_batches', None)
             )
-
+        
+        print("✅ Dataset setup complete!")
     def train_dataloader(self):
         return DataLoader(
             self.train_dataset,
