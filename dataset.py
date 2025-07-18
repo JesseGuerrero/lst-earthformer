@@ -32,39 +32,6 @@ BAND_RANGES = {
     "albedo": {"min": 1.0, "max": 9980.0}
 }
 
-def load_interpolated_scenes(interpolated_file: str = "interpolated.txt") -> Set[str]:
-    """
-    Load list of interpolated scenes that should not be used as ground truth
-    
-    Args:
-        interpolated_file: Path to file containing interpolated scene identifiers
-        
-    Returns:
-        Set of scene identifiers in format "City_State/YYYY-MM-DDTHH:MM:SSZ"
-    """
-    interpolated_scenes = set()
-    
-    if os.path.exists(interpolated_file):
-        with open(interpolated_file, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#'):  # Skip empty lines and comments
-                    interpolated_scenes.add(line)
-        
-        print(f"Loaded {len(interpolated_scenes)} interpolated scenes to exclude from ground truth")
-        
-        # Print some examples for verification
-        if interpolated_scenes:
-            print("Examples of interpolated scenes:")
-            for i, scene in enumerate(sorted(list(interpolated_scenes))[:5]):
-                print(f"  {scene}")
-            if len(interpolated_scenes) > 5:
-                print(f"  ... and {len(interpolated_scenes) - 5} more")
-    else:
-        print(f"Warning: Interpolated scenes file '{interpolated_file}' not found. All scenes will be used as ground truth.")
-    
-    return interpolated_scenes
-
 class LandsatSequenceDataset(Dataset):
     def __init__(
         self, 
@@ -77,12 +44,9 @@ class LandsatSequenceDataset(Dataset):
         val_years: Optional[List[int]] = None,
         test_years: Optional[List[int]] = None,
         debug_monthly_split: bool = False,
-        debug_year: int = 2014,
-        load_to_ram: bool = False,        
-        interpolated_scenes_file: str = "interpolated.txt",
+        debug_year: int = 2014,       
         limit_batches: Optional[float] = None,
         max_input_nodata_pct: float = 0.60,
-        chunk_size: int = 100  # Increased default chunk size
     ):
         """
         Dataset for Landsat sequence prediction using tiled data with year-based splits
@@ -100,9 +64,6 @@ class LandsatSequenceDataset(Dataset):
         self.cached_tiles = {}  # Cache for individual tiles
         self.max_input_nodata_pct = max_input_nodata_pct
         
-        # Load interpolated scenes to exclude from ground truth
-        self.interpolated_scenes = load_interpolated_scenes(interpolated_scenes_file)
-        
         if debug_monthly_split:
             self._setup_debug_monthly_splits()
         else:
@@ -111,7 +72,7 @@ class LandsatSequenceDataset(Dataset):
         self.cities = self._get_all_cities()
         self.band_names = ['DEM', 'LST', 'red', 'green', 'blue', 'ndvi', 'ndwi', 'ndbi', 'albedo']
         
-        # Build tile sequences with interpolated scene filtering
+        # Build tile sequences
         self.tile_sequences = self._build_tile_sequences()
 
         if limit_batches is not None and 0 < limit_batches <= 1.0:
@@ -119,17 +80,13 @@ class LandsatSequenceDataset(Dataset):
             limit_count = int(original_count * limit_batches)
             self.tile_sequences = self.tile_sequences[:limit_count]
             print(f"Limited {split} dataset: {original_count} -> {limit_count} sequences ({limit_batches:.1%})")
-    
-        
-        # Print filtering statistics
-        self._print_filtering_stats()    
-                    
+
         if debug_monthly_split:
             print(f"DEBUG {split} split: {len(self.cities)} cities, year {debug_year}, "
-                  f"months {sorted(self.allowed_months)}, {len(self.tile_sequences)} tile sequences")
+                f"months {sorted(self.allowed_months)}, {len(self.tile_sequences)} tile sequences")
         else:
             print(f"{split} split: {len(self.cities)} cities, {len(self.years)} years "
-                  f"({min(self.years)}-{max(self.years)}), {len(self.tile_sequences)} tile sequences")
+                f"({min(self.years)}-{max(self.years)}), {len(self.tile_sequences)} tile sequences")
             
     @staticmethod
     def _load_sequence_for_cache(sequence_info, dataset_root, cluster, band_names):
@@ -230,38 +187,6 @@ class LandsatSequenceDataset(Dataset):
             normalized_scene[:, :, i] = normalized_band
         
         return normalized_scene
-
-    def _print_filtering_stats(self):
-        """Print statistics about interpolated scene filtering"""
-        if not self.interpolated_scenes:
-            return
-            
-        total_sequences_checked = 0
-        sequences_with_interpolated_output = 0
-        sequences_kept = len(self.tile_sequences)
-        
-        # We can't easily count filtered sequences without rebuilding, but we can show what was loaded
-        print(f"\n=== INTERPOLATED SCENE FILTERING STATS ===")
-        print(f"Interpolated scenes loaded: {len(self.interpolated_scenes)}")
-        print(f"Valid sequences after filtering: {sequences_kept}")
-        
-        # Check if any interpolated scenes affect current split years
-        affected_years = set()
-        for scene_id in self.interpolated_scenes:
-            try:
-                # Extract year from scene_id format: "City_State/YYYY-MM-DDTHH:MM:SSZ"
-                date_part = scene_id.split('/')[1]
-                year = int(date_part.split('-')[0])
-                if year in self.years:
-                    affected_years.add(year)
-            except:
-                continue
-        
-        if affected_years:
-            print(f"Interpolated scenes affect years in this split: {sorted(affected_years)}")
-        else:
-            print(f"No interpolated scenes affect years in this split: {sorted(self.years)}")
-        print(f"{'='*50}")
     
     def _get_cache_filename(self) -> str:
         """Generate a unique cache filename based on dataset parameters"""
@@ -328,20 +253,6 @@ class LandsatSequenceDataset(Dataset):
             print(f"⚠️ Failed to load cache ({e}), building sequences...")
             return None
         
-    def _is_scene_interpolated(self, city: str, scene_date: str) -> bool:
-        """
-        Check if a scene is in the interpolated scenes list
-        
-        Args:
-            city: City name (e.g., "Austin_TX")
-            scene_date: Scene date string (e.g., "2013-12-15T12:00:00Z")
-            
-        Returns:
-            True if scene is interpolated and should not be used as ground truth
-        """
-        # Create scene identifier in the format from interpolated.txt
-        scene_id = f"{city}/{scene_date}"
-        return scene_id in self.interpolated_scenes
     
     def _normalize_scene(self, scene_data: np.ndarray) -> np.ndarray:
         """Normalize scene data to [0, 1] range using predefined ranges"""
@@ -363,7 +274,7 @@ class LandsatSequenceDataset(Dataset):
     
     def _generate_consecutive_sequences(self, city: str, tile_row: int, tile_col: int, 
                                     sorted_months: List[str], monthly_scenes: Dict[str, str]) -> List[Tuple]:
-        """Generate sequences with strict consecutive month requirement (original logic for val/test)"""
+        """Generate sequences with strict consecutive month requirement"""
         sequences = []
         
         for i in range(len(sorted_months) - self.total_sequence_length + 1):
@@ -373,34 +284,22 @@ class LandsatSequenceDataset(Dataset):
             if self._are_consecutive_months(input_months + output_months):
                 if self._verify_tile_sequence_exists(city, tile_row, tile_col, input_months + output_months):
                     
-                    # Check if any output scenes are interpolated
-                    has_interpolated_output = False
-                    for month in output_months:
-                        scene_path = monthly_scenes[month]
-                        scene_dir = Path(scene_path)
-                        scene_date = scene_dir.name
-                        
-                        if self._is_scene_interpolated(city, scene_date):
-                            has_interpolated_output = True
-                            break
-                    
                     # Check if any output scenes have NODATA in LST
                     has_nodata_output = False
-                    if not has_interpolated_output:
-                        for month in output_months:
-                            if self._has_nodata_in_lst_tile(city, month, tile_row, tile_col, monthly_scenes):
-                                has_nodata_output = True
-                                break
+                    for month in output_months:
+                        if self._has_nodata_in_lst_tile(city, month, tile_row, tile_col, monthly_scenes):
+                            has_nodata_output = True
+                            break
                     
                     # Check if input sequence has excessive NODATA
                     has_excessive_input_nodata = False
-                    if not has_interpolated_output and not has_nodata_output:
+                    if not has_nodata_output:
                         avg_nodata_pct = self._calculate_average_input_nodata(city, input_months, tile_row, tile_col, monthly_scenes)
                         if avg_nodata_pct > self.max_input_nodata_pct:
                             has_excessive_input_nodata = True
                     
                     # Only include sequence if passes all filters
-                    if not has_interpolated_output and not has_nodata_output and not has_excessive_input_nodata:
+                    if not has_nodata_output and not has_excessive_input_nodata:
                         sequences.append((city, tile_row, tile_col, input_months, output_months))
         
         return sequences
@@ -452,21 +351,6 @@ class LandsatSequenceDataset(Dataset):
             # Check tile existence for existing months only
             all_months_with_tiles = existing_input_months + existing_output_months
             if not self._verify_tile_sequence_exists(city, tile_row, tile_col, all_months_with_tiles):
-                current_start += relativedelta(months=1)
-                continue
-            
-            # Check interpolated scene filtering for output months
-            has_interpolated_output = False
-            for month in existing_output_months:
-                scene_path = monthly_scenes[month]
-                scene_dir = Path(scene_path)
-                scene_date = scene_dir.name
-                
-                if self._is_scene_interpolated(city, scene_date):
-                    has_interpolated_output = True
-                    break
-            
-            if has_interpolated_output:
                 current_start += relativedelta(months=1)
                 continue
             
@@ -769,8 +653,6 @@ class LandsatSequenceDataset(Dataset):
         else:
             year_stats = {year: 0 for year in self.years}
         
-        print(f"   Excluding {len(self.interpolated_scenes)} interpolated scenes from ground truth...")
-        
         # Check if we should use parallelism
         is_ddp = os.environ.get('LOCAL_RANK') is not None
         use_parallel = not is_ddp and len(self.cities) > 5
@@ -976,7 +858,7 @@ class LandsatSequenceDataset(Dataset):
         return len(self.tile_sequences)
     
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Returns cached data if available, otherwise loads from disk with interpolation for training"""
+        """Always load from pickle cache"""
         if self.cached_data is not None:
             return self.cached_data[idx]
         
@@ -992,6 +874,14 @@ class LandsatSequenceDataset(Dataset):
         output_scenes = self._load_sequence_with_interpolation(
             city, tile_row, tile_col, output_months, monthly_scenes, lst_only=True
         )
+        
+        # Handle case where interpolation fails
+        if input_scenes is None or output_scenes is None:
+            # Return zeros as fallback (this should rarely happen due to filtering)
+            print(f"Warning: Failed to load sequence {city} tile({tile_row},{tile_col})")
+            input_tensor = torch.zeros(self.input_sequence_length, 128, 128, 9)
+            target_tensor = torch.zeros(self.output_sequence_length, 128, 128, 1)
+            return input_tensor, target_tensor
         
         # Convert to tensors
         input_tensor = torch.from_numpy(np.stack(input_scenes, axis=0))
@@ -1013,11 +903,10 @@ class LandsatDataModule(pl.LightningDataModule):
         test_years: Optional[List[int]] = None,
         debug_monthly_split: bool = False,
         debug_year: int = 2014,
-        interpolated_scenes_file: str = "interpolated.txt",
         max_input_nodata_pct: float = 0.60,
         cluster: str = "all",
-        limit_train_batches: Optional[float] = None,  # NEW PARAMETER
-        limit_val_batches: Optional[float] = None     # NEW PARAMETER
+        limit_train_batches: Optional[float] = None,  
+        limit_val_batches: Optional[float] = None     
     ):
         super().__init__()
         self.dataset_root = dataset_root
@@ -1033,14 +922,13 @@ class LandsatDataModule(pl.LightningDataModule):
         self.test_years = test_years
         self.debug_monthly_split = debug_monthly_split
         self.debug_year = debug_year
-        self.interpolated_scenes_file = interpolated_scenes_file
         self.limit_train_batches = limit_train_batches
         self.limit_val_batches = limit_val_batches
         self.max_input_nodata_pct = max_input_nodata_pct
         self.cluster = cluster
 
     def setup(self, stage: Optional[str] = None):
-        """Setup datasets for each stage with interpolated scene filtering"""
+        """Setup datasets for each stage"""
         if self.limit_train_batches == 1:
             self.limit_train_batches = 1.0
         if self.limit_val_batches == 1:
@@ -1059,7 +947,6 @@ class LandsatDataModule(pl.LightningDataModule):
                 test_years=self.test_years,
                 debug_monthly_split=self.debug_monthly_split,
                 debug_year=self.debug_year,
-                interpolated_scenes_file=self.interpolated_scenes_file,                
                 limit_batches=self.limit_train_batches,
                 max_input_nodata_pct=self.max_input_nodata_pct
             )
@@ -1075,7 +962,6 @@ class LandsatDataModule(pl.LightningDataModule):
                 test_years=self.test_years,
                 debug_monthly_split=self.debug_monthly_split,
                 debug_year=self.debug_year,
-                interpolated_scenes_file=self.interpolated_scenes_file,                
                 limit_batches=self.limit_val_batches,
                 max_input_nodata_pct=self.max_input_nodata_pct
             )
@@ -1093,9 +979,8 @@ class LandsatDataModule(pl.LightningDataModule):
                 test_years=self.test_years,
                 debug_monthly_split=self.debug_monthly_split,
                 debug_year=self.debug_year,
-                interpolated_scenes_file=self.interpolated_scenes_file,   
                 max_input_nodata_pct=self.max_input_nodata_pct,             
-                limit_batches=getattr(self, 'limit_test_batches', None)  # Use test-specific limit if available
+                limit_batches=getattr(self, 'limit_test_batches', None)
             )
 
     def train_dataloader(self):
@@ -1127,52 +1012,3 @@ class LandsatDataModule(pl.LightningDataModule):
             pin_memory=True,
             persistent_workers=True if self.num_workers > 0 else False
         )
-
-
-# Usage example with interpolated scene filtering
-def test_interpolated_filtering():
-    """Test the interpolated scene filtering functionality"""
-    
-    print("=== TESTING INTERPOLATED SCENE FILTERING ===\n")
-    
-    # Create data module with interpolated scene filtering
-    data_module = LandsatDataModule(
-        dataset_root="./Data/ML",
-        batch_size=2,
-        input_sequence_length=3,
-        output_sequence_length=1,
-        debug_monthly_split=True,
-        debug_year=2014,
-        interpolated_scenes_file="./Data/ML/interpolated.txt"
-    )
-    
-    # Setup and analyze the results
-    data_module.setup("fit")
-    
-    print(f"Train sequences: {len(data_module.train_dataset.tile_sequences)}")
-    print(f"Val sequences: {len(data_module.val_dataset.tile_sequences)}")
-    
-    # Check specific sequences for interpolated scenes
-    if len(data_module.train_dataset.tile_sequences) > 0:
-        sample_seq = data_module.train_dataset.tile_sequences[0]
-        city, tile_row, tile_col, input_months, output_months = sample_seq
-        
-        print(f"\nSample sequence: {city} tile({tile_row},{tile_col})")
-        print(f"  Input months: {input_months}")
-        print(f"  Output months: {output_months}")
-        
-        # Verify no output months are interpolated
-        interpolated_scenes = data_module.train_dataset.interpolated_scenes
-        monthly_scenes = data_module.train_dataset._get_monthly_scenes(city)
-        
-        for month in output_months:
-            if month in monthly_scenes:
-                scene_path = monthly_scenes[month]
-                scene_dir = Path(scene_path)
-                scene_date = scene_dir.name
-                scene_id = f"{city}/{scene_date}"
-                
-                is_interpolated = scene_id in interpolated_scenes
-                print(f"    {month} ({scene_date}): {'INTERPOLATED' if is_interpolated else 'ORIGINAL'}")
-    
-    return data_module
