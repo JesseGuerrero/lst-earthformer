@@ -179,7 +179,7 @@ def train_landsat_model(
         devices=gpus if gpus > 0 else None,
         precision=precision,
         accumulate_grad_batches=1,
-        val_check_interval=0.5,
+        val_check_interval=0.25,
         limit_train_batches=limit_train_batches,
         limit_val_batches=limit_val_batches,
         limit_test_batches=limit_test_batches,
