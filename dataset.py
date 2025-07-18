@@ -326,7 +326,7 @@ class LandsatSequenceDataset(Dataset):
         monthly_scenes = self._get_monthly_scenes(city)
         
         # Different minimum requirements based on split
-        min_required_scenes = 2 if self.split == 'train' else self.total_sequence_length
+        min_required_scenes = 2
         
         if len(monthly_scenes) < min_required_scenes:
             return city_sequences
@@ -340,10 +340,13 @@ class LandsatSequenceDataset(Dataset):
                     city, tile_row, tile_col, sorted_months, monthly_scenes
                 ))
             else:
-                # For val/test: use original strict consecutive requirement
-                city_sequences.extend(self._generate_consecutive_sequences(
+                city_sequences.extend(self._generate_interpolated_sequences(
                     city, tile_row, tile_col, sorted_months, monthly_scenes
                 ))
+                # For val/test: use original strict consecutive requirement
+                # city_sequences.extend(self._generate_consecutive_sequences(
+                #     city, tile_row, tile_col, sorted_months, monthly_scenes
+                # ))
         
         return city_sequences
 
