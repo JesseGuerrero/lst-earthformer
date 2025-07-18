@@ -137,7 +137,6 @@ def build_split_cache(
             test_years=test_years,
             debug_monthly_split=debug_monthly_split,
             debug_year=debug_year,
-            interpolated_scenes_file=os.path.join(dataset_root, "interpolated.txt"),
             max_input_nodata_pct=max_input_nodata_pct
         )
         
