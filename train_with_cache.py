@@ -169,7 +169,7 @@ def train_landsat_model(
             gradient_as_bucket_view=True
         )
     else:
-        strategy = "auto"  # Let PyTorch Lightning choose automatically
+        strategy = None  # Let PyTorch Lightning choose automatically
     
     # Create trainer
     trainer = pl.Trainer(
@@ -297,8 +297,8 @@ def main():
     parser.add_argument("--precision", type=int, default=16, choices=[16, 32],
                         help="Training precision")
     parser.add_argument("--model_size", type=str, default="medium",
-                        choices=["tiny", "small", "medium", "large"],
-                        help="Model size")
+                    choices=["tiny", "small", "medium", "large", "earthnet"],
+                    help="Model size")
     
     # Data limiting (for debugging)
     parser.add_argument("--limit_train_batches", type=float, default=1.0,

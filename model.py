@@ -18,7 +18,7 @@ class LandsatLSTPredictor(pl.LightningModule):
         max_images_to_log: int = 4,
         input_sequence_length: int = 3,
         output_sequence_length: int = 3,
-        model_size: str = "small",  # NEW: "tiny", "small", "medium", "large"
+        model_size: str = "small",  # NEW: "tiny", "small", "medium", "large", "earthnet"
         **model_kwargs
     ):
         super().__init__()
@@ -65,6 +65,22 @@ class LandsatLSTPredictor(pl.LightningModule):
                 'dec_depth': [1, 1],    # REDUCED from [3, 3]
                 'enc_cuboid_size': [(2, 4, 4), (2, 4, 4)],  # REDUCED from [(2, 8, 8), (2, 8, 8)]
                 'num_global_vectors': 16,  # REDUCED from 32
+            },
+            "earthnet": {
+                'base_units': 256,
+                'num_heads': 4,
+                'enc_depth': [1, 1],
+                'dec_depth': [1, 1],
+                'enc_cuboid_size': [(2, 4, 4), (2, 4, 4)],
+                'num_global_vectors': 8,
+                'use_dec_self_global': False,  # Earthnet disables this
+                'use_dec_cross_global': False,  # Earthnet disables this
+                'initial_downsample_type': 'stack_conv',
+                'initial_downsample_stack_conv_num_layers': 2,
+                'initial_downsample_stack_conv_dim_list': [64, 256],
+                'initial_downsample_stack_conv_downscale_list': [2, 2],
+                'initial_downsample_stack_conv_num_conv_list': [2, 2],
+                'initial_downsample_activation': 'leaky',
             }
         }
         
