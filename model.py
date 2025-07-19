@@ -737,11 +737,11 @@ class LandsatLSTPredictor(pl.LightningModule):
             betas=(0.9, 0.999)
         )
         
-        # Add gradient clipping based on model size
+        # More aggressive clipping for earthnet
         model_size = getattr(self.hparams, 'model_size', 'small')
-        if model_size == "tiny":
-            grad_clip_val = 0.5
-        elif model_size == "small":
+        if model_size == "earthnet":
+            grad_clip_val = 0.5  
+        elif model_size == "large":
             grad_clip_val = 1.0
         else:
             grad_clip_val = 2.0
