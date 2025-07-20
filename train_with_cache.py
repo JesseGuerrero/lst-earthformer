@@ -28,7 +28,8 @@ from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.strategies import DDPStrategy
 import wandb
 from typing import List, Optional
-
+import torch
+torch.set_float32_matmul_precision('medium')
 def train_landsat_model(
     # Dataset parameters (matching setup_data.py)
     dataset_root: str = "./Data/ML",
@@ -62,6 +63,31 @@ def train_landsat_model(
         Dataset parameters match setup_data.py exactly for cache compatibility.
         Training parameters control the actual training process.
     """
+    hyperparameters = {
+        # Dataset parameters
+        "dataset_root": dataset_root,
+        "cluster": cluster,
+        "input_sequence_length": input_sequence_length,
+        "output_sequence_length": output_sequence_length,
+        "train_years": train_years,
+        "val_years": val_years,
+        "test_years": test_years,
+        "debug_monthly_split": debug_monthly_split,
+        "debug_year": debug_year,
+        "max_input_nodata_pct": max_input_nodata_pct,
+        
+        # Training parameters
+        "learning_rate": learning_rate,
+        "batch_size": batch_size,
+        "max_epochs": max_epochs,
+        "num_workers": num_workers,
+        "gpus": gpus,
+        "precision": precision,
+        "model_size": model_size,
+        "limit_train_batches": limit_train_batches,
+        "limit_val_batches": limit_val_batches,
+        "limit_test_batches": limit_test_batches,
+    }
     
     # Generate appropriate tags
     if debug_monthly_split:
@@ -117,6 +143,7 @@ def train_landsat_model(
     logger = WandbLogger(
         project=wandb_project,
         tags=wandb_tags,
+        config=hyperparameters,
         save_dir="./logs",
         log_model=True,
     )
@@ -186,7 +213,6 @@ def train_landsat_model(
         limit_test_batches=limit_test_batches,
         callbacks=[checkpoint_callback, early_stopping, lr_monitor],
         logger=logger,
-        log_every_n_steps=50,
         enable_progress_bar=True,
         enable_model_summary=True,
         deterministic=False,

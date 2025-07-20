@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from typing import Dict, Any, Tuple, Optional, List
 from pathlib import Path
+from sklearn.metrics import r2_score
 
 class LandsatLSTPredictor(pl.LightningModule):
     def __init__(
@@ -31,6 +32,14 @@ class LandsatLSTPredictor(pl.LightningModule):
         # Image logging parameters
         self.log_images_every_n_epochs = log_images_every_n_epochs
         self.max_images_to_log = max_images_to_log
+
+        # For Scatter Plot
+        self.train_predictions = []
+        self.train_targets = []
+        self.val_predictions = []
+        self.val_targets = []
+        self.test_predictions = []
+        self.test_targets = []
         
         # Model size configurations
         model_configs = {
@@ -127,6 +136,60 @@ class LandsatLSTPredictor(pl.LightningModule):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through the model"""
         return self.model(x)    
+
+    def create_correlation_plot(self, all_predictions, all_targets, split_name, epoch):
+        """Create research-quality correlation scatter plot for WandB"""
+        try:
+            # Convert and flatten
+            pred_flat = torch.cat(all_predictions).detach().cpu().numpy().flatten()
+            true_flat = torch.cat(all_targets).detach().cpu().numpy().flatten()
+            
+            # Remove NODATA values
+            valid_mask = (true_flat != 0) & (pred_flat != 0)
+            pred_clean = pred_flat[valid_mask]
+            true_clean = true_flat[valid_mask]
+            
+            if len(pred_clean) < 100:  # Need minimum points for meaningful plot
+                return None
+                
+            # Convert to Fahrenheit for interpretation
+            pred_fahrenheit = pred_clean * (211.0 - (-189.0)) + (-189.0)
+            true_fahrenheit = true_clean * (211.0 - (-189.0)) + (-189.0)
+            
+            # Calculate metrics
+            correlation = np.corrcoef(true_fahrenheit, pred_fahrenheit)[0, 1]
+            r2 = r2_score(true_fahrenheit, pred_fahrenheit)
+            mae = np.mean(np.abs(true_fahrenheit - pred_fahrenheit))
+            rmse = np.sqrt(np.mean((true_fahrenheit - pred_fahrenheit)**2))
+            
+            # Create plot
+            fig, ax = plt.subplots(figsize=(8, 8))
+            
+            # Scatter plot with transparency
+            ax.scatter(true_fahrenheit, pred_fahrenheit, alpha=0.6, s=8, color='gray', edgecolors='none')
+            
+            # Perfect prediction line (diagonal)
+            min_temp = min(true_fahrenheit.min(), pred_fahrenheit.min())
+            max_temp = max(true_fahrenheit.max(), pred_fahrenheit.max())
+            ax.plot([min_temp, max_temp], [min_temp, max_temp], 'k--', linewidth=2, label='Perfect Prediction')
+            
+            # Labels and title
+            ax.set_xlabel('Ground Truth Mean (Background Temperature) (F)', fontsize=12)
+            ax.set_ylabel('Mean (Background Temperature) (F)', fontsize=12)
+            ax.set_title(f'{split_name.title()} - Epoch {epoch}\n'
+                        f'Correlation: {correlation:.3f}, R²: {r2:.3f}, MAE: {mae:.1f}°F, RMSE: {rmse:.1f}°F', 
+                        fontsize=12)
+            
+            # Equal aspect ratio and clean appearance
+            ax.set_aspect('equal', adjustable='box')
+            ax.grid(True, alpha=0.3)
+            plt.tight_layout()
+            
+            return fig
+            
+        except Exception as e:
+            print(f"Error creating correlation plot: {e}")
+            return None
     
     def masked_loss(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         valid_mask = (targets != 0).float()
@@ -275,8 +338,8 @@ class LandsatLSTPredictor(pl.LightningModule):
         mae = self.masked_mae(predictions, targets)
         
         # Log metrics
-        self.log('train_loss', torch.sqrt(loss), on_step=False, on_epoch=True)
-        self.log('train_mae', mae, on_step=False, on_epoch=True)
+        self.log('train_loss', torch.sqrt(loss), on_step=False, on_epoch=True, sync_dist=True)
+        self.log('train_mae', mae, on_step=False, on_epoch=True, sync_dist=True)
         
         # Calculate temperature-specific metrics in Fahrenheit
         with torch.no_grad():
@@ -287,9 +350,14 @@ class LandsatLSTPredictor(pl.LightningModule):
             temp_mae_f = self.masked_mae(pred_fahrenheit, true_fahrenheit)
             temp_rmse_f = torch.sqrt(self.masked_loss(pred_fahrenheit, true_fahrenheit))
             
-            self.log('train_mae_F', temp_mae_f, on_step=True, on_epoch=True, prog_bar=True)
-            self.log('train_rmse_F', temp_rmse_f, on_step=True, on_epoch=True, prog_bar=True)
+            self.log('train_mae_F', temp_mae_f, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
+            self.log('train_rmse_F', temp_rmse_f, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
         
+        # Store predictions for correlation plot (limit to avoid memory issues)
+        if len(self.train_predictions) < 50:  # Limit to ~50 batches per epoch
+            self.train_predictions.append(predictions.detach().cpu())
+            self.train_targets.append(targets.detach().cpu())
+
         return loss
         
     def validation_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
@@ -302,8 +370,8 @@ class LandsatLSTPredictor(pl.LightningModule):
         mae = self.masked_mae(predictions, targets)
         
         # Log normalized metrics
-        self.log('val_loss', torch.sqrt(loss), on_step=False, on_epoch=True)
-        self.log('val_mae', mae, on_step=False, on_epoch=True)
+        self.log('val_loss', torch.sqrt(loss), on_step=False, on_epoch=True, sync_dist=True)
+        self.log('val_mae', mae, on_step=False, on_epoch=True, sync_dist=True)
         
         # Calculate metrics in Fahrenheit
         with torch.no_grad():
@@ -315,8 +383,8 @@ class LandsatLSTPredictor(pl.LightningModule):
             temp_rmse_f = torch.sqrt(self.masked_loss(pred_fahrenheit, true_fahrenheit))
             
             # Log ACTUAL temperature metrics
-            self.log('val_mae_F', temp_mae_f, on_step=True, on_epoch=True, prog_bar=True)
-            self.log('val_rmse_F', temp_rmse_f, on_step=True, on_epoch=True, prog_bar=True)
+            self.log('val_mae_F', temp_mae_f, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
+            self.log('val_rmse_F', temp_rmse_f, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
             
             # Correlation (same in both spaces)
             pred_flat = pred_fahrenheit.flatten()
@@ -328,7 +396,12 @@ class LandsatLSTPredictor(pl.LightningModule):
             if mask.sum() > 1:
                 correlation = torch.corrcoef(torch.stack([pred_flat[mask], true_flat[mask]]))[0, 1]
                 if torch.isfinite(correlation):
-                    self.log('val_correlation', correlation, on_step=False, on_epoch=True)
+                    self.log('val_correlation', correlation, on_step=False, on_epoch=True, sync_dist=True)
+
+        # Store predictions for correlation plot (limit to avoid memory issues)
+        if len(self.val_predictions) < 50:  # Limit to ~50 batches per epoch
+            self.val_predictions.append(predictions.detach().cpu())
+            self.val_targets.append(targets.detach().cpu())
         
         # DIRECT IMAGE LOGGING IN VALIDATION STEP
         # This works in both normal runs and sweeps
@@ -551,9 +624,9 @@ class LandsatLSTPredictor(pl.LightningModule):
         rmse = torch.sqrt(loss)  # RMSE is just sqrt of the MSE loss
         
         # Log metrics - loss is already MSE, rmse is sqrt(MSE)
-        self.log('test_loss', loss, on_step=False, on_epoch=True)  # Log raw MSE loss
-        self.log('test_mae', mae, on_step=False, on_epoch=True)
-        self.log('test_rmse', rmse, on_step=False, on_epoch=True)  # Log RMSE
+        self.log('test_loss', loss, on_step=False, on_epoch=True, sync_dist=True)  # Log raw MSE loss
+        self.log('test_mae', mae, on_step=False, on_epoch=True, sync_dist=True)
+        self.log('test_rmse', rmse, on_step=False, on_epoch=True, sync_dist=True)  # Log RMSE
         
         # Calculate metrics in Fahrenheit (similar to validation_step)
         with torch.no_grad():
@@ -565,8 +638,8 @@ class LandsatLSTPredictor(pl.LightningModule):
             temp_rmse_f = torch.sqrt(self.masked_loss(pred_fahrenheit, true_fahrenheit))
             
             # Log temperature metrics in Fahrenheit
-            self.log('test_mae_F', temp_mae_f, on_step=False, on_epoch=True)
-            self.log('test_rmse_F', temp_rmse_f, on_step=False, on_epoch=True)
+            self.log('test_mae_F', temp_mae_f, on_step=False, on_epoch=True, sync_dist=True)
+            self.log('test_rmse_F', temp_rmse_f, on_step=False, on_epoch=True, sync_dist=True)
             
             # Calculate correlation (excluding NODATA)
             pred_flat = pred_fahrenheit.flatten()
@@ -578,7 +651,7 @@ class LandsatLSTPredictor(pl.LightningModule):
             if mask.sum() > 1:
                 correlation = torch.corrcoef(torch.stack([pred_flat[mask], true_flat[mask]]))[0, 1]
                 if torch.isfinite(correlation):
-                    self.log('test_correlation', correlation, on_step=False, on_epoch=True)
+                    self.log('test_correlation', correlation, on_step=False, on_epoch=True, sync_dist=True)
         
         # DIRECT IMAGE LOGGING IN TEST STEP (similar to validation_step)
         # Log images for first few batches to see model performance on test data
@@ -727,6 +800,10 @@ class LandsatLSTPredictor(pl.LightningModule):
                 import traceback
                 traceback.print_exc()
         
+        # Store predictions for correlation plot
+        self.test_predictions.append(predictions.detach().cpu())
+        self.test_targets.append(targets.detach().cpu())
+
         return loss
     
     def configure_optimizers(self):
@@ -751,3 +828,66 @@ class LandsatLSTPredictor(pl.LightningModule):
             "gradient_clip_val": grad_clip_val,
             "gradient_clip_algorithm": "norm"
         }
+
+    def on_train_epoch_end(self):
+        """Create correlation plot at end of training epoch"""
+        if len(self.train_predictions) > 0 and wandb.run is not None:
+            try:
+                fig = self.create_correlation_plot(
+                    self.train_predictions, self.train_targets, 
+                    "training", self.current_epoch
+                )
+                if fig is not None:
+                    wandb.log({
+                        "train_correlation_plot": wandb.Image(fig)
+                    }, step=self.global_step)
+                    plt.close(fig)
+                    print(f"✅ Logged training correlation plot for epoch {self.current_epoch}")
+            except Exception as e:
+                print(f"❌ Failed to create training correlation plot: {e}")
+        
+        # Clear stored data
+        self.train_predictions = []
+        self.train_targets = []
+
+    def on_validation_epoch_end(self):
+        """Create correlation plot at end of validation epoch"""
+        if len(self.val_predictions) > 0 and wandb.run is not None:
+            try:
+                fig = self.create_correlation_plot(
+                    self.val_predictions, self.val_targets, 
+                    "validation", self.current_epoch
+                )
+                if fig is not None:
+                    wandb.log({
+                        "val_correlation_plot": wandb.Image(fig)
+                    }, step=self.global_step)
+                    plt.close(fig)
+                    print(f"✅ Logged validation correlation plot for epoch {self.current_epoch}")
+            except Exception as e:
+                print(f"❌ Failed to create validation correlation plot: {e}")
+        
+        # Clear stored data
+        self.val_predictions = []
+        self.val_targets = []
+
+    def on_test_epoch_end(self):
+        """Create correlation plot at end of test epoch"""
+        if len(self.test_predictions) > 0 and wandb.run is not None:
+            try:
+                fig = self.create_correlation_plot(
+                    self.test_predictions, self.test_targets, 
+                    "test", self.current_epoch
+                )
+                if fig is not None:
+                    wandb.log({
+                        "test_correlation_plot": wandb.Image(fig)
+                    })  # No step for test (final result)
+                    plt.close(fig)
+                    print(f"✅ Logged test correlation plot")
+            except Exception as e:
+                print(f"❌ Failed to create test correlation plot: {e}")
+        
+        # Clear stored data
+        self.test_predictions = []
+        self.test_targets = []
