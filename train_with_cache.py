@@ -154,7 +154,7 @@ def train_landsat_model(
     
     early_stopping = EarlyStopping(
         monitor='val_loss',
-        patience=30 if not debug_monthly_split else 20,
+        patience=15 if not debug_monthly_split else 10,
         mode='min',
         verbose=True
     )
