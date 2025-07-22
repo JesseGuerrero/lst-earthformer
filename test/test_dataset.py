@@ -117,8 +117,8 @@ class LandsatSequenceDataset(Dataset):
         
         config_hash = hashlib.md5(config_str.encode()).hexdigest()[:8]
         
-        cache_dir = self.dataset_root / "sequence_cache"
-        cache_filename = str(cache_dir / f"sequences_{self.split}_{self.cluster}_{config_hash}.pkl")
+        cache_dir = self.dataset_root / "test_sequence_cache"
+        cache_filename = str(cache_dir / f"test_sequences_{self.split}_{self.cluster}_{config_hash}.pkl")
         
         print(f"🔍 Looking for cache file: {cache_filename}")
         
@@ -505,16 +505,16 @@ class LandsatSequenceDataset(Dataset):
         """Get one scene per month for a city from tiled data, filtered by years and months"""
         if city in self._monthly_scenes_cache:
             return self._monthly_scenes_cache[city]
-        if self.cluster == "all":
-            city_dir = self.dataset_root / "Cities_Tiles" / city
-        else:
-            city_dir = self.dataset_root / "Clustered" / self.cluster / "Cities_Tiles" / city        
-        if not city_dir.exists():
-            return {}
-        
         monthly_scenes = {}
-        scene_dirs = [d for d in city_dir.iterdir() if d.is_dir()]
-            
+        scene_dirs = []
+        for cluster in ["1", "2", "3", "4"]:
+            city_dir = self.dataset_root / "Clustered" / cluster / "Cities_Tiles" / city # creates a Path
+            if not city_dir.exists():
+                return {}    
+            for month_path in city_dir.iterdir(): #iterdir create path objects of the sub-contents of a folder.
+                if month_path.is_dir():
+                    scene_dirs.append(month_path)
+        
         for scene_dir in scene_dirs:
             try:
                 date_str = scene_dir.name  # e.g., "2016-12-26T18:10:25Z"
@@ -541,7 +541,6 @@ class LandsatSequenceDataset(Dataset):
                 continue
 
         self._monthly_scenes_cache[city] = monthly_scenes
-        print(self._monthly_scenes_cache)
         return monthly_scenes
     
     def _validate_tiled_scene(self, scene_dir: Path) -> bool:

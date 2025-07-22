@@ -19,3 +19,8 @@ train2.sh
 train2.txt
 trainOld.txt
 DEM_row_000_col_000.tif
+Personalized/Earthnet_No_Aux/1.ckpt
+Personalized/Earthnet_No_Aux/2.ckpt
+Personalized/Earthnet_No_Aux/3.ckpt
+Personalized/Earthnet_No_Aux/4.ckpt
+Personalized/Earthnet_No_Aux/all.ckpt
