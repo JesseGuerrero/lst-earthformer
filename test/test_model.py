@@ -24,7 +24,7 @@ class LandsatLSTPredictor(pl.LightningModule):
     ):
         super().__init__()
         self.save_hyperparameters()
-
+        self.dataset_root = Path("../Data/ML")
         # Store sequence lengths
         self.input_sequence_length = input_sequence_length
         self.output_sequence_length = output_sequence_length
@@ -271,12 +271,10 @@ class LandsatLSTPredictor(pl.LightningModule):
     def _get_file_paths(self, city: str, tile_row: int, tile_col: int, months: List[str]) -> Dict[str, List[str]]:
         """Get file paths for the tiles used in this sequence"""
         if not hasattr(self.trainer, 'datamodule'):
-            return {}
-            
-        dataset_root = Path(self.trainer.datamodule.dataset_root)
+            return {}                    
         
         file_paths = {
-            'dem_path': str(dataset_root / "DEM_2014_Tiles" / city / f"DEM_row_{tile_row:03d}_col_{tile_col:03d}.tif"),
+            'dem_path': str(self.dataset_root / "DEM_2014_Tiles" / city / f"DEM_row_{tile_row:03d}_col_{tile_col:03d}.tif"),
             'monthly_scenes': {}
         }
         
@@ -301,8 +299,10 @@ class LandsatLSTPredictor(pl.LightningModule):
         if not hasattr(self.trainer, 'datamodule'):
             return {}
 
+        monthly_scenes = {}
+        scene_dirs = []
         for cluster in ["1", "2", "3", "4"]:
-            city_dir = dataset_root / "Clustered" / cluster / "Cities_Tiles" / city # creates a Path
+            city_dir = self.dataset_root / "Clustered" / cluster / "Cities_Tiles" / city # creates a Path
             if not city_dir.exists():
                 return {}    
             for month_path in city_dir.iterdir(): #iterdir create path objects of the sub-contents of a folder.
@@ -614,7 +614,7 @@ class LandsatLSTPredictor(pl.LightningModule):
         """Test step with proper masked loss usage and image logging similar to validation"""
         inputs, targets = batch
         metadata = self.extract_batch_metadata(batch_idx)
-        print(metadata['file_paths'])
+        # print(metadata)
         predictions = self.forward(inputs)
         
         # Calculate masked loss (MSE) - this is what we return for optimization
