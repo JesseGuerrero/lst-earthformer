@@ -237,9 +237,6 @@ def train_landsat_model(
         except Exception as e:
             print(f"⚠️ Test failed: {e}")
         
-        print(f"\n🎉 Training completed successfully!")
-        print(f"📁 Best model: {checkpoint_callback.best_model_path}")
-        
         if wandb.run is not None:
             print(f"🔗 View experiment: {wandb.run.url}")
         
