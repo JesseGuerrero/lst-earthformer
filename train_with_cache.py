@@ -50,6 +50,7 @@ def train_landsat_model(
     max_epochs: int = 3,
     num_workers: int = 8,
     gpus: int = 1,
+    device: int = -1,
     precision: int = 16,
     model_size: str = "medium",
     limit_train_batches: float = 1.0,
@@ -75,6 +76,7 @@ def train_landsat_model(
         "debug_monthly_split": debug_monthly_split,
         "debug_year": debug_year,
         "max_input_nodata_pct": max_input_nodata_pct,
+        "augmented": 1,
         
         # Training parameters
         "learning_rate": learning_rate,
@@ -82,6 +84,7 @@ def train_landsat_model(
         "max_epochs": max_epochs,
         "num_workers": num_workers,
         "gpus": gpus,
+        "device": device,
         "precision": precision,
         "model_size": model_size,
         "limit_train_batches": limit_train_batches,
@@ -156,13 +159,19 @@ def train_landsat_model(
     print(f"🏷️ Run name: {run_name}")
     print(f"📁 Checkpoints: {checkpoint_dir}")
     print()
+
+    if wandb.run is not None:
+        try:
+            wandb.alert(title="Starting new run", text="Your script is running smoothly!")
+        except Exception as e:
+            print(f"⚠️ Failed to send start alert: {e}")
     
     # Initialize model
     model = LandsatLSTPredictor(
         learning_rate=learning_rate,
         weight_decay=1e-5,
         warmup_steps=1000,
-        max_epochs=max_epochs,
+        max_epochs=max_epochs,        
         input_sequence_length=input_sequence_length,
         output_sequence_length=output_sequence_length,
         model_size=model_size
@@ -173,15 +182,15 @@ def train_landsat_model(
         dirpath=checkpoint_dir,
         filename='{epoch:02d}',
         save_top_k=3,
-        monitor='val_loss',
+        monitor='val_rmse_F',
         mode='min',
         save_last=True,
         verbose=True
     )
     
     early_stopping = EarlyStopping(
-        monitor='val_loss',
-        patience=15 if not debug_monthly_split else 10,
+        monitor='val_rmse_F',
+        patience=8,
         mode='min',
         verbose=True
     )
@@ -196,17 +205,17 @@ def train_landsat_model(
             gradient_as_bucket_view=True
         )
     else:
-        strategy = None  # Let PyTorch Lightning choose automatically
+        strategy = 'auto'  # Let PyTorch Lightning choose automatically
     
     # Create trainer
     trainer = pl.Trainer(
         max_epochs=max_epochs,
         accelerator='gpu' if gpus > 0 else 'cpu',
         strategy=strategy,
+        # devices=[device] if device != -1 else None,
         devices=gpus if gpus > 0 else None,
         precision=precision,
         accumulate_grad_batches=1,
-        val_check_interval=1.0,
         num_sanity_val_steps=2,
         limit_train_batches=limit_train_batches,
         limit_val_batches=limit_val_batches,
@@ -320,6 +329,8 @@ def main():
                         help="Number of dataloader workers")
     parser.add_argument("--gpus", type=int, default=1,
                         help="Number of GPUs to use")
+    parser.add_argument("--device", type=int, default=-1,
+                    help="Number of GPUs to use")
     parser.add_argument("--precision", type=int, default=16, choices=[16, 32],
                         help="Training precision")
     parser.add_argument("--model_size", type=str, default="medium",
@@ -376,6 +387,7 @@ def main():
             max_epochs=args.max_epochs,
             num_workers=args.num_workers,
             gpus=args.gpus,
+            device=args.device,
             precision=args.precision,
             model_size=args.model_size,
             limit_train_batches=args.limit_train_batches,

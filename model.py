@@ -354,7 +354,7 @@ class LandsatLSTPredictor(pl.LightningModule):
             self.log('train_rmse_F', temp_rmse_f, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
         
         # Store predictions for correlation plot (limit to avoid memory issues)
-        if len(self.train_predictions) < 50:  # Limit to ~50 batches per epoch
+        if self.trainer.is_global_zero and len(self.train_predictions) < 50:  # Limit to ~50 batches per epoch
             self.train_predictions.append(predictions.detach().cpu())
             self.train_targets.append(targets.detach().cpu())
 
@@ -399,7 +399,7 @@ class LandsatLSTPredictor(pl.LightningModule):
                     self.log('val_correlation', correlation, on_step=False, on_epoch=True, sync_dist=True)
 
         # Store predictions for correlation plot (limit to avoid memory issues)
-        if len(self.val_predictions) < 50:  # Limit to ~50 batches per epoch
+        if self.trainer.is_global_zero and len(self.val_predictions) < 50:  # Limit to ~50 batches per epoch
             self.val_predictions.append(predictions.detach().cpu())
             self.val_targets.append(targets.detach().cpu())
         
@@ -801,8 +801,9 @@ class LandsatLSTPredictor(pl.LightningModule):
                 traceback.print_exc()
         
         # Store predictions for correlation plot
-        self.test_predictions.append(predictions.detach().cpu())
-        self.test_targets.append(targets.detach().cpu())
+        if self.trainer.is_global_zero and len(self.test_predictions) < 20:
+            self.test_predictions.append(predictions.detach().cpu())
+            self.test_targets.append(targets.detach().cpu())
 
         return loss
     
@@ -817,7 +818,7 @@ class LandsatLSTPredictor(pl.LightningModule):
         # More aggressive clipping for earthnet
         model_size = getattr(self.hparams, 'model_size', 'small')
         if model_size == "earthnet":
-            grad_clip_val = 0.5  
+            grad_clip_val = 1.0  
         elif model_size == "large":
             grad_clip_val = 1.0
         else:
@@ -830,8 +831,10 @@ class LandsatLSTPredictor(pl.LightningModule):
         }
 
     def on_train_epoch_end(self):
+        print("train epoch end ran")
         """Create correlation plot at end of training epoch"""
-        if len(self.train_predictions) > 0 and wandb.run is not None:
+        # Only log from rank 0 in distributed training
+        if self.trainer.is_global_zero and len(self.train_predictions) > 0 and wandb.run is not None:
             try:
                 fig = self.create_correlation_plot(
                     self.train_predictions, self.train_targets, 
@@ -839,20 +842,23 @@ class LandsatLSTPredictor(pl.LightningModule):
                 )
                 if fig is not None:
                     wandb.log({
-                        "train_correlation_plot": wandb.Image(fig)
-                    }, step=self.global_step)
+                        "train_correlation_plot": wandb.Image(fig),
+                        "epoch": self.current_epoch
+                    })
                     plt.close(fig)
                     print(f"✅ Logged training correlation plot for epoch {self.current_epoch}")
             except Exception as e:
                 print(f"❌ Failed to create training correlation plot: {e}")
         
-        # Clear stored data
+        # Clear stored data on all ranks
         self.train_predictions = []
         self.train_targets = []
 
     def on_validation_epoch_end(self):
+        print("validation epoch end ran")
         """Create correlation plot at end of validation epoch"""
-        if len(self.val_predictions) > 0 and wandb.run is not None:
+        # Only log from rank 0 in distributed training
+        if self.trainer.is_global_zero and len(self.val_predictions) > 0 and wandb.run is not None:
             try:
                 fig = self.create_correlation_plot(
                     self.val_predictions, self.val_targets, 
@@ -860,20 +866,23 @@ class LandsatLSTPredictor(pl.LightningModule):
                 )
                 if fig is not None:
                     wandb.log({
-                        "val_correlation_plot": wandb.Image(fig)
-                    }, step=self.global_step)
+                        "val_correlation_plot": wandb.Image(fig),
+                        "epoch": self.current_epoch
+                    })
                     plt.close(fig)
                     print(f"✅ Logged validation correlation plot for epoch {self.current_epoch}")
             except Exception as e:
                 print(f"❌ Failed to create validation correlation plot: {e}")
         
-        # Clear stored data
+        # Clear stored data on all ranks
         self.val_predictions = []
         self.val_targets = []
 
     def on_test_epoch_end(self):
+        print("test epoch end ran")
         """Create correlation plot at end of test epoch"""
-        if len(self.test_predictions) > 0 and wandb.run is not None:
+        # Only log from rank 0 in distributed training
+        if self.trainer.is_global_zero and len(self.test_predictions) > 0 and wandb.run is not None:
             try:
                 fig = self.create_correlation_plot(
                     self.test_predictions, self.test_targets, 
@@ -881,13 +890,14 @@ class LandsatLSTPredictor(pl.LightningModule):
                 )
                 if fig is not None:
                     wandb.log({
-                        "test_correlation_plot": wandb.Image(fig)
-                    })  # No step for test (final result)
+                        "test_correlation_plot": wandb.Image(fig),
+                        "epoch": self.current_epoch
+                    })
                     plt.close(fig)
-                    print(f"✅ Logged test correlation plot")
+                    print(f"✅ Logged test correlation plot for epoch {self.current_epoch}")
             except Exception as e:
                 print(f"❌ Failed to create test correlation plot: {e}")
         
-        # Clear stored data
+        # Clear stored data on all ranks
         self.test_predictions = []
         self.test_targets = []

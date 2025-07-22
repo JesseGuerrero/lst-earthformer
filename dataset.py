@@ -19,6 +19,7 @@ import numpy as np
 from dateutil.relativedelta import relativedelta
 import pickle
 import hashlib
+import random
 
 BAND_RANGES = {
     "red": {"min": 1.0, "max": 10000.0},
@@ -60,6 +61,8 @@ class LandsatSequenceDataset(Dataset):
         self.debug_monthly_split = debug_monthly_split
         self.debug_year = debug_year
         self._scene_validation_cache = {}
+        self._monthly_scenes_cache = {}
+        self._dem_cache = {}
         self.max_input_nodata_pct = max_input_nodata_pct
         
         if debug_monthly_split:
@@ -533,6 +536,8 @@ class LandsatSequenceDataset(Dataset):
     
     def _get_monthly_scenes(self, city: str) -> Dict[str, str]:
         """Get one scene per month for a city from tiled data, filtered by years and months"""
+        if city in self._monthly_scenes_cache:
+            return self._monthly_scenes_cache[city]
         if self.cluster == "all":
             city_dir = self.dataset_root / "Cities_Tiles" / city
         else:
@@ -567,7 +572,8 @@ class LandsatSequenceDataset(Dataset):
             except Exception as e:
                 print(f"Warning: Could not parse date from {scene_dir.name}: {e}")
                 continue
-        
+
+        self._monthly_scenes_cache[city] = monthly_scenes
         return monthly_scenes
     
     def _validate_tiled_scene(self, scene_dir: Path) -> bool:
@@ -695,9 +701,19 @@ class LandsatSequenceDataset(Dataset):
             return np.zeros((128, 128), dtype=np.float32)
     
     def _load_dem_tile(self, city: str, tile_row: int, tile_col: int) -> np.ndarray:
-        """Load DEM tile for the city and position"""
+        """Load DEM tile for the city and position (with caching)"""
+        cache_key = (city, tile_row, tile_col)
+        
+        # Check cache first
+        if cache_key in self._dem_cache:
+            return self._dem_cache[cache_key]
+        
         dem_path = self.dataset_root / "DEM_2014_Tiles" / city / f"DEM_row_{tile_row:03d}_col_{tile_col:03d}.tif"
-        return self._load_raster(str(dem_path))
+        dem_data = self._load_raster(str(dem_path))
+        
+        # Cache the result (DEM is static and reused frequently)
+        self._dem_cache[cache_key] = dem_data
+        return dem_data
     
     def _load_scene_tile(self, city: str, month: str, tile_row: int, tile_col: int) -> np.ndarray:
         """Load all bands for a scene tile"""
@@ -722,49 +738,70 @@ class LandsatSequenceDataset(Dataset):
     def __len__(self) -> int:
         return len(self.tile_sequences)
     
-    def _interpolate_missing_scenes(self, months: List[str], existing_data: Dict[str, np.ndarray], 
-                                lst_only: bool = False) -> List[np.ndarray]:
-        """Interpolate missing scenes using pandas linear interpolation"""
-        # Convert month strings to datetime for proper ordering
-        month_dates = []
-        for month_str in months:
+
+    def _interpolate_missing_scenes(self, months: List[str], existing_data: Dict[str, np.ndarray]) -> List[np.ndarray]:
+        """
+        Optimized implementation with accurate extrapolation and fast integer operations
+        """
+        if len(existing_data) == len(months):
+            return [existing_data[m] for m in months]
+        
+        # Fast integer conversion - no datetime objects
+        def month_to_int(month_str: str) -> int:
             year, month = map(int, month_str.split('-'))
-            month_dates.append(datetime(year, month, 1))
+            return year * 12 + month  # Convert to months since year 0
         
-        # Get the shape from existing data
-        sample_scene = next(iter(existing_data.values()))
-        height, width, channels = sample_scene.shape
+        # Vectorized conversions
+        target_nums = np.array([month_to_int(m) for m in months])
+        existing_months = sorted(existing_data.keys())
+        existing_nums = np.array([month_to_int(m) for m in existing_months])
         
-        # Initialize output array
-        interpolated_scenes = []
+        # Stack existing data once
+        existing_stack = np.stack([existing_data[m] for m in existing_months])
+        n_existing, height, width, channels = existing_stack.shape
         
-        # For each pixel location and channel, create a time series and interpolate
-        for h in range(height):
-            for w in range(width):
-                for c in range(channels):
-                    # Create pandas Series with existing values
-                    time_series_data = {}
-                    for month_str, scene_data in existing_data.items():
-                        year, month = map(int, month_str.split('-'))
-                        month_date = datetime(year, month, 1)
-                        time_series_data[month_date] = scene_data[h, w, c]
-                    
-                    # Create Series and interpolate
-                    series = pd.Series(time_series_data)
-                    series = series.reindex(month_dates)
-                    interpolated_series = series.interpolate(method='linear', limit_direction='both')
-                    
-                    # Store interpolated values
-                    for i, month_date in enumerate(month_dates):
-                        if i == 0:  # Initialize scene array on first pixel
-                            if len(interpolated_scenes) <= i:
-                                interpolated_scenes.append(np.zeros((height, width, channels), dtype=np.float32))
-                        elif len(interpolated_scenes) <= i:
-                            interpolated_scenes.append(np.zeros((height, width, channels), dtype=np.float32))
-                        
-                        interpolated_scenes[i][h, w, c] = interpolated_series[month_date]
+        # Preallocate result
+        result_stack = np.zeros((len(months), height, width, channels), dtype=np.float32)
         
-        return interpolated_scenes
+        # Vectorized approach: find indices for all targets at once
+        # Use searchsorted for fast binary search
+        insert_indices = np.searchsorted(existing_nums, target_nums)
+        
+        for i, (target_num, insert_idx) in enumerate(zip(target_nums, insert_indices)):
+            if insert_idx < len(existing_nums) and existing_nums[insert_idx] == target_num:
+                # Exact match
+                result_stack[i] = existing_stack[insert_idx]
+            elif insert_idx == 0:
+                # Before all existing data - extrapolate using first two points
+                if len(existing_nums) >= 2:
+                    x1, x2 = existing_nums[0], existing_nums[1]
+                    y1, y2 = existing_stack[0], existing_stack[1]
+                    weight = (target_num - x1) / (x2 - x1)
+                    result_stack[i] = y1 + weight * (y2 - y1)
+                else:
+                    result_stack[i] = existing_stack[0]
+            elif insert_idx == len(existing_nums):
+                # After all existing data - extrapolate using last two points
+                if len(existing_nums) >= 2:
+                    x1, x2 = existing_nums[-2], existing_nums[-1]
+                    y1, y2 = existing_stack[-2], existing_stack[-1]
+                    weight = (target_num - x2) / (x2 - x1)
+                    result_stack[i] = y2 + weight * (y2 - y1)
+                else:
+                    result_stack[i] = existing_stack[-1]
+            else:
+                # Interpolate between surrounding points
+                before_idx = insert_idx - 1
+                after_idx = insert_idx
+                
+                before_num = existing_nums[before_idx]
+                after_num = existing_nums[after_idx]
+                
+                # Linear interpolation weight
+                weight = (target_num - before_num) / (after_num - before_num)
+                result_stack[i] = (1 - weight) * existing_stack[before_idx] + weight * existing_stack[after_idx]
+        
+        return [result_stack[i] for i in range(len(months))]
 
     def _load_sequence_with_interpolation(self, city: str, tile_row: int, tile_col: int, 
                                     months: List[str], monthly_scenes: Dict[str, str], 
@@ -795,7 +832,7 @@ class LandsatSequenceDataset(Dataset):
         
         # If training split and missing some months, interpolate
         if len(existing_data) >= 2: 
-            return self._interpolate_missing_scenes(months, existing_data, lst_only)
+            return self._interpolate_missing_scenes(months, existing_data)
         
         # This should never happen due to filtering - raise error to debug
         raise ValueError(
@@ -805,6 +842,27 @@ class LandsatSequenceDataset(Dataset):
             f"split={self.split}, lst_only={lst_only}. "
             f"Expected at least 2 existing months but found {len(existing_data)}."
         )
+
+    def _apply_spatial_augmentation(self, input_tensor: torch.Tensor, target_tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Apply spatial augmentations (rotation and flips) with 50% probability"""        
+        if random.random() < 0.5:  # 50% chance to apply augmentation
+            # Random rotation (0, 90, 180, 270 degrees)
+            k = random.randint(0, 3)
+            if k > 0:
+                input_tensor = torch.rot90(input_tensor, k, dims=[-3, -2])  # Rotate H,W dimensions
+                target_tensor = torch.rot90(target_tensor, k, dims=[-3, -2])
+            
+            # Random horizontal flip (50% chance)
+            if random.random() < 0.5:
+                input_tensor = torch.flip(input_tensor, dims=[-2])  # Flip width
+                target_tensor = torch.flip(target_tensor, dims=[-2])
+            
+            # Random vertical flip (50% chance)
+            if random.random() < 0.5:
+                input_tensor = torch.flip(input_tensor, dims=[-3])  # Flip height
+                target_tensor = torch.flip(target_tensor, dims=[-3])
+    
+        return input_tensor, target_tensor
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:       
         # Fallback to original disk loading
@@ -824,6 +882,10 @@ class LandsatSequenceDataset(Dataset):
         # Convert to tensors
         input_tensor = torch.from_numpy(np.stack(input_scenes, axis=0))
         target_tensor = torch.from_numpy(np.stack(output_scenes, axis=0))
+        
+        # Apply augmentation only for training split
+        if self.split == 'train':
+            input_tensor, target_tensor = self._apply_spatial_augmentation(input_tensor, target_tensor)
         
         return input_tensor, target_tensor
 
@@ -934,7 +996,9 @@ class LandsatDataModule(pl.LightningDataModule):
             shuffle=True,
             num_workers=self.num_workers,
             pin_memory=True,
-            persistent_workers=True if self.num_workers > 0 else False
+            persistent_workers=True if self.num_workers > 0 else False,
+            prefetch_factor=8,
+            multiprocessing_context='spawn'
         )
     
     def val_dataloader(self):

@@ -16,7 +16,7 @@ VAL_YEARS="2022 2023"
 TEST_YEARS="2024 2025"
 
 # Parameter variations
-CLUSTERS=("1" "3")
+CLUSTERS=("2" "4" "all")
 INPUT_LENGTHS=(12 6 3)
 MAX_NODATA_VALUES=(0.5 0.75)
 

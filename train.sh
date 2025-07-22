@@ -4,7 +4,7 @@
 # Runs training for all combinations of cluster, input_length, max_nodata, learning_rate, and precision parameters
 # Uses pre-built caches from setup_data.py for fast startup
 
-LOG_FILE="train.txt"
+LOG_FILE="train1.txt"
 
 # Function to log and display messages
 log_and_echo() {
@@ -29,11 +29,12 @@ VAL_YEARS="2022 2023"
 TEST_YEARS="2024 2025"
 
 # Training-specific parameters
-WANDB_PROJECT="AAAI-Project-New-HPC"
-LEARNING_RATES=(0.00001 0.000005 0.0001)
-BATCH_SIZE=64
+WANDB_PROJECT="AAAI-Project-quick-test"
+LEARNING_RATES=(0.0005)
+BATCH_SIZE=32
 MAX_EPOCHS=200
-NUM_WORKERS=111
+NUM_WORKERS=32
+DEVICE=0
 GPUS=2
 PRECISIONS=(32)
 MODEL_SIZE="earthnet"
@@ -42,9 +43,9 @@ LIMIT_VAL_BATCHES=1.0
 LIMIT_TEST_BATCHES=1.0
 
 # Parameter variations (matching cache building script)
-CLUSTERS=("1" "3")
-INPUT_LENGTHS=(3 6 12)
-MAX_NODATA_VALUES=(0.5 0.75)
+CLUSTERS=("1" "all" "2" "3" "4")
+INPUT_LENGTHS=(12) 
+MAX_NODATA_VALUES=(0.5)
 
 # Calculate total combinations
 TOTAL_COMBINATIONS=$((${#CLUSTERS[@]} * ${#INPUT_LENGTHS[@]} * ${#MAX_NODATA_VALUES[@]} * ${#LEARNING_RATES[@]} * ${#PRECISIONS[@]}))
@@ -90,6 +91,7 @@ for cluster in "${CLUSTERS[@]}"; do
                         --max_epochs $MAX_EPOCHS \
                         --num_workers $NUM_WORKERS \
                         --gpus $GPUS \
+                        --device $DEVICE \
                         --precision $precision \
                         --model_size "$MODEL_SIZE" \
                         --limit_train_batches $LIMIT_TRAIN_BATCHES \
