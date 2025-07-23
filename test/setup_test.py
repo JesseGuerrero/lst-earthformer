@@ -58,16 +58,15 @@ def get_cache_filename(
     # Create a hash of the configuration
     import hashlib
     
-    config_str = f"{split}_{cluster}_{input_seq_len}_{output_seq_len}"
-    config_str += f"_{train_years}_{val_years}_{test_years}"
-    config_str += f"_{debug_monthly_split}_{debug_year}_{max_input_nodata_pct}"
+    config_str = f"{input_seq_len}_{output_seq_len}"
+    config_str += f"_{test_years}"
+    config_str += f"_{max_input_nodata_pct}"
     
     config_hash = hashlib.md5(config_str.encode()).hexdigest()[:8]
     
     cache_dir = Path(dataset_root) / "test_sequence_cache"
     cache_dir.mkdir(exist_ok=True)
-    
-    return str(cache_dir / f"test_sequences_{cluster}_{config_hash}.pkl")
+    return str(cache_dir / f"test_sequences_{config_hash}.pkl")
 
 def build_split_cache(
     dataset_root: str,

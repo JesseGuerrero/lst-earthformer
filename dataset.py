@@ -1,4 +1,4 @@
-#original
+#this is the original
 import os
 import torch
 import rasterio
@@ -297,7 +297,7 @@ class LandsatSequenceDataset(Dataset):
         """Process a single city and return its sequences, with relaxed requirements for training split"""
         city_sequences = []
         
-        available_tiles = self._get_available_tiles(city)
+        available_tiles = self._get_available_rows_cols(city)
         monthly_scenes = self._get_monthly_scenes(city)
         
         min_required_scenes = 2
@@ -483,7 +483,7 @@ class LandsatSequenceDataset(Dataset):
         
         return sorted(all_cities)
     
-    def _get_available_tiles(self, city: str) -> Dict[Tuple[int, int], bool]:
+    def _get_available_rows_cols(self, city: str) -> Dict[Tuple[int, int], bool]:
         """Get all available tile positions for a city"""
         dem_dir = self.dataset_root / "DEM_2014_Tiles" / city
         available_tiles = {}
@@ -500,48 +500,45 @@ class LandsatSequenceDataset(Dataset):
                         continue
         
         return available_tiles
-    
+
     def _get_monthly_scenes(self, city: str) -> Dict[str, str]:
-        """Get one scene per month for a city from tiled data, filtered by years and months"""
         if city in self._monthly_scenes_cache:
             return self._monthly_scenes_cache[city]
         if self.cluster == "all":
             city_dir = self.dataset_root / "Cities_Tiles" / city
         else:
-            city_dir = self.dataset_root / "Clustered" / self.cluster / "Cities_Tiles" / city        
+            city_dir = self.dataset_root / "Clustered" / self.cluster / "Cities_Tiles" / city
         if not city_dir.exists():
             return {}
-        
+
         monthly_scenes = {}
         scene_dirs = [d for d in city_dir.iterdir() if d.is_dir()]
-            
         for scene_dir in scene_dirs:
             try:
                 date_str = scene_dir.name  # e.g., "2016-12-26T18:10:25Z"
                 date_obj = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-                
+
                 # Filter by years for this split
                 if date_obj.year not in self.years:
                     continue
-                
+
                 # Additional filtering for debug monthly split
                 if self.debug_monthly_split and self.allowed_months is not None:
                     if date_obj.month not in self.allowed_months:
                         continue
-                    
+
                 month_key = f"{date_obj.year}-{date_obj.month:02d}"
-                
+
                 # Only keep first scene per month
                 if month_key not in monthly_scenes:
                     if self._validate_tiled_scene(scene_dir):
                         monthly_scenes[month_key] = str(scene_dir)
-                        
+
             except Exception as e:
                 print(f"Warning: Could not parse date from {scene_dir.name}: {e}")
                 continue
 
         self._monthly_scenes_cache[city] = monthly_scenes
-        print(self._monthly_scenes_cache)
         return monthly_scenes
     
     def _validate_tiled_scene(self, scene_dir: Path) -> bool:

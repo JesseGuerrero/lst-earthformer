@@ -304,7 +304,7 @@ class LandsatLSTPredictor(pl.LightningModule):
         for cluster in ["1", "2", "3", "4"]:
             city_dir = self.dataset_root / "Clustered" / cluster / "Cities_Tiles" / city # creates a Path
             if not city_dir.exists():
-                return {}    
+                continue 
             for month_path in city_dir.iterdir(): #iterdir create path objects of the sub-contents of a folder.
                 if month_path.is_dir():
                     scene_dirs.append(month_path)
