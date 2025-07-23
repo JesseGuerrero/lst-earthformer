@@ -30,7 +30,7 @@ class PersonalizedLandsatLSTPredictor(pl.LightningModule):
     ):
         super().__init__()
         self.save_hyperparameters()
-        self.use_all = use_all
+        self.use_all = use_all # If true use one model for all clusters, otherwise if false use individual cluster models.
 
         # Store sequence lengths
         self.input_sequence_length = input_sequence_length
@@ -162,19 +162,17 @@ class PersonalizedLandsatLSTPredictor(pl.LightningModule):
 
     def _get_cluster_ids(self, batch_idx: int, batch_size: int) -> List[str]:
         """Extract cluster IDs for current batch"""
-        try:
-            dataset = self.trainer.datamodule.test_dataset
-            cluster_ids = []
-            for i in range(batch_size):
-                sample_idx = batch_idx * batch_size + i
-                if sample_idx < len(dataset.tile_sequences):
-                    cluster = dataset.tile_sequences[sample_idx][0]  # First element is cluster
-                    cluster_ids.append(cluster)
-                else:
-                    cluster_ids.append("1")  # Default
-            return cluster_ids
-        except:
-            return ["1"] * batch_size  # Fallback
+        dataset = self.trainer.datamodule.test_dataset
+        cluster_ids = []
+        for i in range(batch_size):
+            sample_idx = batch_idx * batch_size + i
+            if sample_idx < len(dataset.tile_sequences):
+                cluster = dataset.tile_sequences[sample_idx][0]  # First element is cluster
+                cluster_ids.append(cluster)
+        if len(cluster_ids) == 0:
+            raise RuntimeError("No cluster IDs found")
+        return cluster_ids
+
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through the model"""
@@ -697,7 +695,12 @@ class PersonalizedLandsatLSTPredictor(pl.LightningModule):
 
         # Log per-cluster metrics
         for cluster_id in ["1", "2", "3", "4"]:
-            cluster_mask = [cid == cluster_id for cid in cluster_ids]
+            cluster_mask = []
+            for cid in cluster_ids:
+                if cid == cluster_id:
+                    cluster_mask.append(True)
+                else:
+                    cluster_mask.append(False)
             if any(cluster_mask):
                 cluster_indices = [i for i, mask in enumerate(cluster_mask) if mask]
                 cluster_pred = predictions[cluster_indices]
