@@ -704,8 +704,8 @@ class PersonalizedLandsatLSTPredictor(pl.LightningModule):
             temp_rmse_f = torch.sqrt(self.masked_loss(pred_fahrenheit, true_fahrenheit))
 
             # Log overall temperature metrics in Fahrenheit
-            self.log('test_mae_F_All', temp_mae_f, on_step=False, on_epoch=True, sync_dist=True)
-            self.log('test_rmse_F_All', temp_rmse_f, on_step=False, on_epoch=True, sync_dist=True)
+            self.log('test_mae_F_Overall', temp_mae_f, on_step=False, on_epoch=True, sync_dist=True)
+            self.log('test_rmse_F_Overall', temp_rmse_f, on_step=False, on_epoch=True, sync_dist=True)
 
             # Store cluster-specific predictions and targets for end-of-epoch aggregation
             current_cluster = cluster_ids[0]  # Since batch_size=1, only one cluster per batch
