@@ -216,14 +216,14 @@ class LandsatLSTPredictor(pl.LightningModule):
         else:
             return torch.tensor(0.0, device=predictions.device)
 
-    def extract_batch_metadata(self, batch_info: Any, batch_idx: int) -> Dict[str, Any]:
+    def extract_batch_metadata(self, batch_idx: int) -> Dict[str, Any]:
         """
         Extract metadata from the current batch.
         This method should be called during the training/validation step.
         """
         # Get the dataset to extract metadata
-        if hasattr(self.trainer, 'datamodule') and hasattr(self.trainer.datamodule, 'train_dataset'):
-            dataset = self.trainer.datamodule.train_dataset
+        if hasattr(self.trainer, 'datamodule') and hasattr(self.trainer.datamodule, 'test_dataset'):
+            dataset = self.trainer.datamodule.test_dataset
 
             # Calculate actual sample indices from batch
             batch_size = self.trainer.datamodule.batch_size
@@ -243,7 +243,7 @@ class LandsatLSTPredictor(pl.LightningModule):
                 if sample_idx < len(dataset):
                     # Get the tile sequence info from dataset
                     if hasattr(dataset, 'tile_sequences') and sample_idx < len(dataset.tile_sequences):
-                        city, tile_row, tile_col, input_months, output_months = dataset.tile_sequences[sample_idx]
+                        cluster, city, tile_row, tile_col, input_months, output_months = dataset.tile_sequences[sample_idx]
 
                         sample_metadata = {
                             'sample_idx': sample_idx,
@@ -256,7 +256,8 @@ class LandsatLSTPredictor(pl.LightningModule):
                             'input_date_range': f"{input_months[0]} to {input_months[-1]}",
                             'output_date_range': f"{output_months[0]} to {output_months[-1]}",
                             'sequence_length': len(input_months),
-                            'file_paths': self._get_file_paths(city, tile_row, tile_col, input_months + output_months)
+                            'cluster': cluster
+                            # 'file_paths': self._get_file_paths(city, tile_row, tile_col, input_months + output_months)
                         }
                         metadata['samples_metadata'].append(sample_metadata)
 
@@ -617,8 +618,10 @@ class LandsatLSTPredictor(pl.LightningModule):
         """Test step with proper masked loss usage and image logging similar to validation"""
         self.eval()
         inputs, targets = batch
+        metadata = self.extract_batch_metadata(batch_idx)
+        print(metadata['cluster']) # -> pick a model 1,2,3,4 based on this, they are in this folder /root/lst-earthformer/Personalized/Earthnet_No_Aux
+
         predictions = self.forward(inputs)
-        print("The output has nan:",torch.isnan(predictions).any())
 
         # Calculate masked loss (MSE) - this is what we return for optimization
         loss = self.masked_loss(predictions, targets)
