@@ -634,9 +634,18 @@ class LandsatLSTPredictor(pl.LightningModule):
     def test_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
         """Test step with proper masked loss usage and image logging similar to validation"""
         inputs, targets = batch
-        metadata = self.extract_batch_metadata(batch_idx)
+        # metadata = self.extract_batch_metadata(batch_idx)
         # print(metadata)
+
         predictions = self.forward(inputs)
+
+        def check_tensor(tensor, name):
+            has_nan = torch.isnan(tensor).any()
+            has_inf = torch.isinf(tensor).any()
+            print(f"{name} - NaN: {has_nan}, Inf: {has_inf}")
+        check_tensor(inputs, "inputs")
+        check_tensor(targets, "targets")
+        check_tensor(predictions, "predictions")
 
         # Calculate masked loss (MSE) - this is what we return for optimization
         loss = self.masked_loss(predictions, targets)
