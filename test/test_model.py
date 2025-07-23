@@ -20,6 +20,7 @@ class PersonalizedLandsatLSTPredictor(pl.LightningModule):
             weight_decay: float = 1e-5,
             warmup_steps: int = 1000,
             max_epochs: int = 100,
+            use_all: bool = False,
             log_images_every_n_epochs: int = 1,
             max_images_to_log: int = 4,
             input_sequence_length: int = 3,
@@ -29,6 +30,7 @@ class PersonalizedLandsatLSTPredictor(pl.LightningModule):
     ):
         super().__init__()
         self.save_hyperparameters()
+        self.use_all = use_all
 
         # Store sequence lengths
         self.input_sequence_length = input_sequence_length
@@ -143,7 +145,7 @@ class PersonalizedLandsatLSTPredictor(pl.LightningModule):
 
     def _load_cluster_models(self):
         """Load all 4 cluster-specific models"""
-        for cluster_id in ["1", "2", "3", "4"]:
+        for cluster_id in ["1", "2", "3", "4", "all"]:
             checkpoint_path = self.checkpoint_dir / f"{cluster_id}.ckpt"
             if checkpoint_path.exists():
                 try:
@@ -667,11 +669,13 @@ class PersonalizedLandsatLSTPredictor(pl.LightningModule):
         predictions = torch.zeros_like(targets)
 
         for i, cluster_id in enumerate(cluster_ids):
+            if self.use_all:
+                cluster_id = "all" # just use the one all model
             if cluster_id in self.cluster_models:
                 # Use cluster-specific model
                 sample_input = inputs[i:i + 1]  # Single sample
                 with torch.no_grad():
-                    sample_pred = self.cluster_models[cluster_id](sample_input)
+                    sample_pred = self.cluster_models[cluster_id](sample_input) # this is the model forward
                 predictions[i:i + 1] = sample_pred
             else:
                 # Fallback to main model

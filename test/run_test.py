@@ -44,7 +44,7 @@ def train_landsat_model(
     max_input_nodata_pct: float = 0.95,
     
     # Training parameters
-    wandb_project: str = "AAAI-Project-final-tests",
+    wandb_project: str = "AAAI-Project-personalized-tests",
     learning_rate: float = 0.001,
     batch_size: int = 1,
     max_epochs: int = 3,
@@ -56,6 +56,7 @@ def train_landsat_model(
     limit_train_batches: float = 1.0,
     limit_val_batches: float = 1.0,
     limit_test_batches: float = 1.0,
+    use_all: bool = False,
 ):
     """
     Train Landsat LST prediction model with cache-aware configuration.
@@ -78,6 +79,7 @@ def train_landsat_model(
         "debug_year": debug_year,
         "max_input_nodata_pct": max_input_nodata_pct,
         "augmented": 1,
+        "use_all": use_all,
         
         # Training parameters
         "learning_rate": learning_rate,
@@ -229,8 +231,7 @@ def train_landsat_model(
                 input_sequence_length=input_sequence_length,
                 output_sequence_length=output_sequence_length,
                 model_size=model_size,
-                # Add any other parameters that might have changed
-                strict=False  # Allow some mismatches
+                use_all=use_all
             )
             test_results = trainer.test(model_from_checkpoint, data_module)
             print(f"✅ Test completed: {test_results}")
@@ -263,7 +264,7 @@ def train_landsat_model(
         except:
             pass
     
-    return trainer, model, data_module
+    return trainer, model_from_checkpoint, data_module
 
 def main():
     parser = argparse.ArgumentParser(description="Train Landsat LST prediction model with cache awareness")
@@ -329,7 +330,9 @@ def main():
                         help="Fraction of validation data to use")
     parser.add_argument("--limit_test_batches", type=float, default=1.0,
                         help="Fraction of test data to use")
-    
+    parser.add_argument("--use_all", type=int, default=0, choices=[0, 1],
+                        help="0 for false 1 for true")
+
     args = parser.parse_args()
     
     # Validate arguments
