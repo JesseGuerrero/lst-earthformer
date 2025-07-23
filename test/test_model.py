@@ -694,6 +694,7 @@ class PersonalizedLandsatLSTPredictor(pl.LightningModule):
         self.log('test_rmse', rmse, on_step=False, on_epoch=True, sync_dist=True)  # Log RMSE
 
         # Log per-cluster metrics
+        # We want to keep the individual cluster metrics so we can compare the rmse of the cluster models to the all model
         for cluster_id in ["1", "2", "3", "4"]:
             cluster_mask = []
             for cid in cluster_ids:
