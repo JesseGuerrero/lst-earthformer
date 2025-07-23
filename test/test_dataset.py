@@ -474,6 +474,10 @@ class LandsatSequenceDataset(Dataset):
         return available_tiles
 
     def _get_monthly_scenes(self, cluster: str, city: str) -> Dict[str, Dict[str, str]]:
+        if cluster not in self._monthly_scenes_cache:
+            self._monthly_scenes_cache[cluster] = {}
+        if city in self._monthly_scenes_cache[cluster]:
+            return self._monthly_scenes_cache[cluster][city]
         if cluster in self._monthly_scenes_cache and city in self._monthly_scenes_cache[cluster]:
             return self._monthly_scenes_cache[cluster][city]
 
