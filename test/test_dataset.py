@@ -561,7 +561,7 @@ class LandsatSequenceDataset(Dataset):
         sequences = [seq for city_seqs in city_results for seq in city_seqs]
         
         # Calculate statistics (existing code)
-        for city, tile_row, tile_col, input_months, output_months in sequences:
+        for cluster, city, tile_row, tile_col, input_months, output_months in sequences:
             if self.debug_monthly_split:
                 # Extract month from first input month (ignore cluster)
                 first_month_str = input_months[0]
