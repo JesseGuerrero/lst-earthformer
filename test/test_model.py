@@ -655,10 +655,10 @@ class PersonalizedLandsatLSTPredictor(pl.LightningModule):
             return {}
 
     def test_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
-        """Test step with cluster-specific model routing and image logging"""
+        """Test step with cluster-specific model routing and simple cluster metrics"""
         self.eval()
         inputs, targets = batch
-        batch_size = 1 # batch size is always one to keep cluster calculations simple
+        batch_size = 1  # batch size is always one to keep cluster calculations simple
 
         # Get cluster IDs for this batch
         cluster_ids = self._get_cluster_ids(batch_idx, batch_size)
@@ -668,12 +668,12 @@ class PersonalizedLandsatLSTPredictor(pl.LightningModule):
 
         for i, cluster_id in enumerate(cluster_ids):
             if self.use_all:
-                cluster_id = "all" # just use the one all model
+                cluster_id = "all"  # just use the one all model
             if cluster_id in self.cluster_models:
                 # Use cluster-specific model
                 sample_input = inputs[i:i + 1]  # Single sample
                 with torch.no_grad():
-                    sample_pred = self.cluster_models[cluster_id](sample_input) # this is the model forward
+                    sample_pred = self.cluster_models[cluster_id](sample_input)  # this is the model forward
                 predictions[i:i + 1] = sample_pred
             else:
                 # Fallback to main model
@@ -688,37 +688,10 @@ class PersonalizedLandsatLSTPredictor(pl.LightningModule):
         mae = self.masked_mae(predictions, targets)
         rmse = torch.sqrt(loss)  # RMSE is just sqrt of the MSE loss
 
-        # Log metrics - loss is already MSE, rmse is sqrt(MSE)
+        # Log overall metrics - loss is already MSE, rmse is sqrt(MSE)
         self.log('test_loss', loss, on_step=False, on_epoch=True, sync_dist=True)  # Log raw MSE loss
         self.log('test_mae', mae, on_step=False, on_epoch=True, sync_dist=True)
         self.log('test_rmse', rmse, on_step=False, on_epoch=True, sync_dist=True)  # Log RMSE
-
-        # Log per-cluster metrics
-        # We want to keep the individual cluster metrics so we can compare the rmse of the cluster models to the all model
-        for cluster_id in ["1", "2", "3", "4"]:
-            cluster_mask = []
-            for cid in cluster_ids:
-                if cid == cluster_id:
-                    cluster_mask.append(True)
-                else:
-                    cluster_mask.append(False)
-            if any(cluster_mask):
-                cluster_indices = [i for i, mask in enumerate(cluster_mask) if mask]
-                cluster_pred = predictions[cluster_indices]
-                cluster_true = targets[cluster_indices]
-
-
-                # Fahrenheit space metrics
-                cluster_pred_f = cluster_pred * (211.0 - (-189.0)) + (-189.0)
-                cluster_true_f = cluster_true * (211.0 - (-189.0)) + (-189.0)
-
-                cluster_mae_f = self.masked_mae(cluster_pred_f, cluster_true_f)
-                cluster_rmse_f = torch.sqrt(self.masked_loss(cluster_pred_f, cluster_true_f))
-
-                self.log(f'test_mae_F_C{cluster_id}', cluster_mae_f,
-                         on_step=False, on_epoch=True, sync_dist=True)
-                self.log(f'test_rmse_F_C{cluster_id}', cluster_rmse_f,
-                         on_step=False, on_epoch=True, sync_dist=True)
 
         # Calculate metrics in Fahrenheit (similar to validation_step)
         with torch.no_grad():
@@ -729,9 +702,17 @@ class PersonalizedLandsatLSTPredictor(pl.LightningModule):
             temp_mae_f = self.masked_mae(pred_fahrenheit, true_fahrenheit)
             temp_rmse_f = torch.sqrt(self.masked_loss(pred_fahrenheit, true_fahrenheit))
 
-            # Log temperature metrics in Fahrenheit
+            # Log overall temperature metrics in Fahrenheit
             self.log('test_mae_F_All', temp_mae_f, on_step=False, on_epoch=True, sync_dist=True)
             self.log('test_rmse_F_All', temp_rmse_f, on_step=False, on_epoch=True, sync_dist=True)
+
+            # Log cluster-specific metrics for current batch (PyTorch Lightning will aggregate)
+            current_cluster = cluster_ids[0]  # Since batch_size=1, only one cluster per batch
+            if current_cluster in ["1", "2", "3", "4"]:
+                self.log(f'test_mae_F_C{current_cluster}', temp_mae_f,
+                         on_step=False, on_epoch=True, sync_dist=True)
+                self.log(f'test_rmse_F_C{current_cluster}', temp_rmse_f,
+                         on_step=False, on_epoch=True, sync_dist=True)
 
             # Calculate correlation (excluding NODATA)
             pred_flat = pred_fahrenheit.flatten()
@@ -744,6 +725,11 @@ class PersonalizedLandsatLSTPredictor(pl.LightningModule):
                 correlation = torch.corrcoef(torch.stack([pred_flat[mask], true_flat[mask]]))[0, 1]
                 if torch.isfinite(correlation):
                     self.log('test_correlation', correlation, on_step=False, on_epoch=True, sync_dist=True)
+
+                    # Also log cluster-specific correlation
+                    if current_cluster in ["1", "2", "3", "4"]:
+                        self.log(f'test_correlation_C{current_cluster}', correlation,
+                                 on_step=False, on_epoch=True, sync_dist=True)
 
         # DIRECT IMAGE LOGGING IN TEST STEP (similar to validation_step)
         # Log images for first few batches to see model performance on test data
@@ -877,14 +863,14 @@ class PersonalizedLandsatLSTPredictor(pl.LightningModule):
                                 transform=axes[2, 0].transAxes, fontsize=12, fontweight='bold')
 
                 # Add title with test-specific information
-                plt.suptitle(f'Test - Batch {batch_idx}\n'
+                plt.suptitle(f'Test - Batch {batch_idx} - Cluster {current_cluster}\n'
                              f'Input Length: {input_len}, Output Length: {output_len}', fontsize=12)
                 plt.tight_layout()
 
-                # FIXED: Log directly to wandb WITHOUT specifying step
+                # Log directly to wandb
                 wandb.log({
                     "test_predictions": wandb.Image(fig)
-                })  # Removed step parameter to let wandb auto-increment
+                })
 
                 plt.close(fig)
                 print(f"✅ Successfully logged test image at batch {batch_idx}")
