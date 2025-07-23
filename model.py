@@ -330,7 +330,7 @@ class LandsatLSTPredictor(pl.LightningModule):
         
         # Forward pass
         predictions = self.forward(inputs)
-        
+
         # Calculate loss
         loss = self.masked_loss(predictions, targets)
         

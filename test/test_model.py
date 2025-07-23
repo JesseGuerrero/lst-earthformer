@@ -7,25 +7,25 @@ import numpy as np
 from typing import Dict, Any, Tuple, Optional, List
 from pathlib import Path
 from sklearn.metrics import r2_score
-from datetime import datetime
+
 
 class LandsatLSTPredictor(pl.LightningModule):
     def __init__(
-        self,
-        learning_rate: float = 1e-4,
-        weight_decay: float = 1e-5,
-        warmup_steps: int = 1000,
-        max_epochs: int = 100,
-        log_images_every_n_epochs: int = 1,
-        max_images_to_log: int = 4,
-        input_sequence_length: int = 3,
-        output_sequence_length: int = 3,
-        model_size: str = "small",  # NEW: "tiny", "small", "medium", "large", "earthnet"
-        **model_kwargs
+            self,
+            learning_rate: float = 1e-4,
+            weight_decay: float = 1e-5,
+            warmup_steps: int = 1000,
+            max_epochs: int = 100,
+            log_images_every_n_epochs: int = 1,
+            max_images_to_log: int = 4,
+            input_sequence_length: int = 3,
+            output_sequence_length: int = 3,
+            model_size: str = "small",  # NEW: "tiny", "small", "medium", "large", "earthnet"
+            **model_kwargs
     ):
         super().__init__()
         self.save_hyperparameters()
-        self.dataset_root = Path("../Data/ML")
+
         # Store sequence lengths
         self.input_sequence_length = input_sequence_length
         self.output_sequence_length = output_sequence_length
@@ -60,19 +60,19 @@ class LandsatLSTPredictor(pl.LightningModule):
                 'enc_cuboid_size': [(2, 4, 4), (2, 4, 4)],
                 'num_global_vectors': 8,
             },
-                "medium": {
-                'base_units': 128,      # Keep same
-                'num_heads': 8,         # Keep same
-                'enc_depth': [2, 2],    # REDUCED from [3, 3]
-                'dec_depth': [1, 1],    # REDUCED from [2, 2]
+            "medium": {
+                'base_units': 128,  # Keep same
+                'num_heads': 8,  # Keep same
+                'enc_depth': [2, 2],  # REDUCED from [3, 3]
+                'dec_depth': [1, 1],  # REDUCED from [2, 2]
                 'enc_cuboid_size': [(2, 4, 4), (2, 4, 4)],  # REDUCED from [(2, 4, 4), (2, 8, 8)]
                 'num_global_vectors': 12,  # REDUCED from 16
             },
             "large": {
-                'base_units': 144,      # REDUCED from 192
-                'num_heads': 8,         # REDUCED from 12 (must divide base_units)
-                'enc_depth': [2, 2],    # REDUCED from [4, 4]
-                'dec_depth': [1, 1],    # REDUCED from [3, 3]
+                'base_units': 144,  # REDUCED from 192
+                'num_heads': 8,  # REDUCED from 12 (must divide base_units)
+                'enc_depth': [2, 2],  # REDUCED from [4, 4]
+                'dec_depth': [1, 1],  # REDUCED from [3, 3]
                 'enc_cuboid_size': [(2, 4, 4), (2, 4, 4)],  # REDUCED from [(2, 8, 8), (2, 8, 8)]
                 'num_global_vectors': 16,  # REDUCED from 32
             },
@@ -129,7 +129,7 @@ class LandsatLSTPredictor(pl.LightningModule):
 
         # Band names for visualization
         self.band_names = ['DEM (+10k offset)', 'LST (°F)', 'Red (×10k)', 'Green (×10k)', 'Blue (×10k)',
-                        'NDVI (×10k)', 'NDWI (×10k)', 'NDBI (×10k)', 'Albedo (×10k)']
+                           'NDVI (×10k)', 'NDWI (×10k)', 'NDBI (×10k)', 'Albedo (×10k)']
 
         param_count = sum(p.numel() for p in self.model.parameters())
         print(f"Model '{model_size}' initialized with {param_count:,} parameters")
@@ -161,7 +161,7 @@ class LandsatLSTPredictor(pl.LightningModule):
             correlation = np.corrcoef(true_fahrenheit, pred_fahrenheit)[0, 1]
             r2 = r2_score(true_fahrenheit, pred_fahrenheit)
             mae = np.mean(np.abs(true_fahrenheit - pred_fahrenheit))
-            rmse = np.sqrt(np.mean((true_fahrenheit - pred_fahrenheit)**2))
+            rmse = np.sqrt(np.mean((true_fahrenheit - pred_fahrenheit) ** 2))
 
             # Create plot
             fig, ax = plt.subplots(figsize=(8, 8))
@@ -178,8 +178,8 @@ class LandsatLSTPredictor(pl.LightningModule):
             ax.set_xlabel('Ground Truth Mean (Background Temperature) (F)', fontsize=12)
             ax.set_ylabel('Mean (Background Temperature) (F)', fontsize=12)
             ax.set_title(f'{split_name.title()} - Epoch {epoch}\n'
-                        f'Correlation: {correlation:.3f}, R²: {r2:.3f}, MAE: {mae:.1f}°F, RMSE: {rmse:.1f}°F',
-                        fontsize=12)
+                         f'Correlation: {correlation:.3f}, R²: {r2:.3f}, MAE: {mae:.1f}°F, RMSE: {rmse:.1f}°F',
+                         fontsize=12)
 
             # Equal aspect ratio and clean appearance
             ax.set_aspect('equal', adjustable='box')
@@ -216,18 +216,18 @@ class LandsatLSTPredictor(pl.LightningModule):
         else:
             return torch.tensor(0.0, device=predictions.device)
 
-    def extract_batch_metadata(self, batch_idx: int) -> Dict[str, Any]:
+    def extract_batch_metadata(self, batch_info: Any, batch_idx: int) -> Dict[str, Any]:
         """
         Extract metadata from the current batch.
         This method should be called during the training/validation step.
         """
         # Get the dataset to extract metadata
-        if hasattr(self.trainer, 'datamodule') and hasattr(self.trainer.datamodule, 'test_dataset'):
-            dataset = self.trainer.datamodule.test_dataset
+        if hasattr(self.trainer, 'datamodule') and hasattr(self.trainer.datamodule, 'train_dataset'):
+            dataset = self.trainer.datamodule.train_dataset
 
             # Calculate actual sample indices from batch
             batch_size = self.trainer.datamodule.batch_size
-            start_idx = batch_idx * batch_size # Start idx is the sample id
+            start_idx = batch_idx * batch_size
 
             metadata = {
                 'batch_idx': batch_idx,
@@ -243,7 +243,7 @@ class LandsatLSTPredictor(pl.LightningModule):
                 if sample_idx < len(dataset):
                     # Get the tile sequence info from dataset
                     if hasattr(dataset, 'tile_sequences') and sample_idx < len(dataset.tile_sequences):
-                        cluster, city, tile_row, tile_col, input_months, output_months = dataset.tile_sequences[sample_idx]
+                        city, tile_row, tile_col, input_months, output_months = dataset.tile_sequences[sample_idx]
 
                         sample_metadata = {
                             'sample_idx': sample_idx,
@@ -256,8 +256,7 @@ class LandsatLSTPredictor(pl.LightningModule):
                             'input_date_range': f"{input_months[0]} to {input_months[-1]}",
                             'output_date_range': f"{output_months[0]} to {output_months[-1]}",
                             'sequence_length': len(input_months),
-                            # 'file_paths': self._get_file_paths(city, tile_row, tile_col, input_months + output_months),
-                            'cluster': cluster
+                            'file_paths': self._get_file_paths(city, tile_row, tile_col, input_months + output_months)
                         }
                         metadata['samples_metadata'].append(sample_metadata)
 
@@ -270,78 +269,60 @@ class LandsatLSTPredictor(pl.LightningModule):
             'note': 'Limited metadata - dataset info not accessible'
         }
 
-    # def _get_file_paths(self, city: str, tile_row: int, tile_col: int, months: List[str]) -> Dict[str, List[str]]:
-    #     """Get file paths for the tiles used in this sequence"""
-    #     if not hasattr(self.trainer, 'datamodule'):
-    #         return {}
-    #
-    #     file_paths = {
-    #         'dem_path': str(self.dataset_root / "DEM_2014_Tiles" / city / f"DEM_row_{tile_row:03d}_col_{tile_col:03d}.tif"),
-    #         'monthly_scenes': {}
-    #     }
-    #
-    #     # Get paths for each month's tiles
-    #     for month in months:
-    #         monthly_scenes = self._get_monthly_scenes_for_city(city)
-    #         if month in monthly_scenes:
-    #             scene_dir = Path(monthly_scenes[month])
-    #             month_paths = {}
-    #
-    #             band_names = ['LST', 'red', 'green', 'blue', 'ndvi', 'ndwi', 'ndbi', 'albedo']
-    #             for band in band_names:
-    #                 tile_path = scene_dir / f"{band}_row_{tile_row:03d}_col_{tile_col:03d}.tif"
-    #                 month_paths[band] = str(tile_path)
-    #
-    #             file_paths['monthly_scenes'][month] = month_paths
-    #
-    #     return file_paths
+    def _get_file_paths(self, city: str, tile_row: int, tile_col: int, months: List[str]) -> Dict[str, List[str]]:
+        """Get file paths for the tiles used in this sequence"""
+        if not hasattr(self.trainer, 'datamodule'):
+            return {}
 
-    def _get_monthly_scenes(self, cluster: str, city: str) -> Dict[str, Dict[str, str]]:
-        city_dir = self.dataset_root / "Clustered" / cluster / "Cities_Tiles" / city
+        dataset_root = Path(self.trainer.datamodule.dataset_root)
+
+        file_paths = {
+            'dem_path': str(dataset_root / "DEM_2014_Tiles" / city / f"DEM_row_{tile_row:03d}_col_{tile_col:03d}.tif"),
+            'monthly_scenes': {}
+        }
+
+        # Get paths for each month's tiles
+        for month in months:
+            monthly_scenes = self._get_monthly_scenes_for_city(city)
+            if month in monthly_scenes:
+                scene_dir = Path(monthly_scenes[month])
+                month_paths = {}
+
+                band_names = ['LST', 'red', 'green', 'blue', 'ndvi', 'ndwi', 'ndbi', 'albedo']
+                for band in band_names:
+                    tile_path = scene_dir / f"{band}_row_{tile_row:03d}_col_{tile_col:03d}.tif"
+                    month_paths[band] = str(tile_path)
+
+                file_paths['monthly_scenes'][month] = month_paths
+
+        return file_paths
+
+    def _get_monthly_scenes_for_city(self, city: str) -> Dict[str, str]:
+        """Helper to get monthly scenes for a city (simplified version of dataset method)"""
+        if not hasattr(self.trainer, 'datamodule'):
+            return {}
+
+        dataset_root = Path(self.trainer.datamodule.dataset_root)
+        city_dir = dataset_root / "Cities_Tiles" / city
+
         if not city_dir.exists():
             return {}
 
         monthly_scenes = {}
         scene_dirs = [d for d in city_dir.iterdir() if d.is_dir()]
+
         for scene_dir in scene_dirs:
             try:
-                date_str = scene_dir.name  # e.g., "2016-12-26T18:10:25Z"
+                from datetime import datetime
+                date_str = scene_dir.name
                 date_obj = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-
-                # Filter by years for this split
-                if date_obj.year not in self.years:
-                    continue
-
-                # Additional filtering for debug monthly split
-                if self.debug_monthly_split and self.allowed_months is not None:
-                    if date_obj.month not in self.allowed_months:
-                        continue
-
                 month_key = f"{date_obj.year}-{date_obj.month:02d}"
 
-                # Only keep first scene per month
                 if month_key not in monthly_scenes:
-                    if self._validate_tiled_scene(scene_dir):
-                        monthly_scenes[month_key] = str(scene_dir)
-
-            except Exception as e:
-                print(f"Warning: Could not parse date from {scene_dir.name}: {e}")
+                    monthly_scenes[month_key] = str(scene_dir)
+            except:
                 continue
-        '''
-        {
-            "1": {
-                "San Antonio": {
-                    "2013-04": "scene_path",
-                    "2013-05": "scene_path",
-                    "2013-06": "scene_path",
-                    etc...
-                    "2025-04": "scene_path",
-                    "2025-05": "scene_path",
-                    "2025-06": "scene_path",
-                }
-            }
-        }
-        '''
+
         return monthly_scenes
 
     def training_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
@@ -426,8 +407,8 @@ class LandsatLSTPredictor(pl.LightningModule):
         # DIRECT IMAGE LOGGING IN VALIDATION STEP
         # This works in both normal runs and sweeps
         if (batch_idx == 0 and  # Only first batch
-            self.current_epoch % self.log_images_every_n_epochs == 0 and  # Every N epochs
-            wandb.run is not None):  # Only if wandb is available
+                self.current_epoch % self.log_images_every_n_epochs == 0 and  # Every N epochs
+                wandb.run is not None):  # Only if wandb is available
 
             try:
                 print(f"🖼️ Attempting to log images at epoch {self.current_epoch}")
@@ -447,16 +428,16 @@ class LandsatLSTPredictor(pl.LightningModule):
                 # Process each sample
                 for sample_idx in range(num_samples_to_log):
                     # Extract sequences for this sample (keeping original indexing logic)
-                    input_seq = inputs_cpu[sample_idx]    # [time, H, W, channels]
+                    input_seq = inputs_cpu[sample_idx]  # [time, H, W, channels]
                     target_seq = targets_cpu[sample_idx]  # [time, H, W, 1]
-                    pred_seq = predictions_cpu[sample_idx] # [time, H, W, 1]
+                    pred_seq = predictions_cpu[sample_idx]  # [time, H, W, 1]
 
                     input_len = input_seq.shape[0]
                     output_len = target_seq.shape[0]
                     max_timesteps = max(input_len, output_len)
 
                     # Create the visualization for this sample
-                    fig, axes = plt.subplots(3, max_timesteps, figsize=(4*max_timesteps, 12))
+                    fig, axes = plt.subplots(3, max_timesteps, figsize=(4 * max_timesteps, 12))
 
                     # Handle single timestep case
                     if max_timesteps == 1:
@@ -480,11 +461,11 @@ class LandsatLSTPredictor(pl.LightningModule):
                             vmin_input = lst_masked.min()
                             vmax_input = lst_masked.max()
                             im = ax.imshow(lst_masked, cmap='RdYlBu_r', vmin=vmin_input, vmax=vmax_input, alpha=0.9)
-                            ax.set_title(f'Input T={t+1}\n({vmin_input:.1f}°F - {vmax_input:.1f}°F)', fontsize=10)
+                            ax.set_title(f'Input T={t + 1}\n({vmin_input:.1f}°F - {vmax_input:.1f}°F)', fontsize=10)
                             plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
                         else:
                             ax.imshow(np.zeros_like(lst_input_fahrenheit), cmap='RdYlBu_r', alpha=0)
-                            ax.set_title(f'Input T={t+1}\n(No Valid Data)', fontsize=10)
+                            ax.set_title(f'Input T={t + 1}\n(No Valid Data)', fontsize=10)
 
                         ax.axis('off')
 
@@ -509,11 +490,12 @@ class LandsatLSTPredictor(pl.LightningModule):
                             vmin_target = lst_masked.min()
                             vmax_target = lst_masked.max()
                             im = ax.imshow(lst_masked, cmap='RdYlBu_r', vmin=vmin_target, vmax=vmax_target, alpha=0.9)
-                            ax.set_title(f'Target T={input_len+t+1}\n({vmin_target:.1f}°F - {vmax_target:.1f}°F)', fontsize=10)
+                            ax.set_title(f'Target T={input_len + t + 1}\n({vmin_target:.1f}°F - {vmax_target:.1f}°F)',
+                                         fontsize=10)
                             plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
                         else:
                             ax.imshow(np.zeros_like(lst_target_fahrenheit), cmap='RdYlBu_r', alpha=0)
-                            ax.set_title(f'Target T={input_len+t+1}\n(No Valid Data)', fontsize=10)
+                            ax.set_title(f'Target T={input_len + t + 1}\n(No Valid Data)', fontsize=10)
 
                         ax.axis('off')
 
@@ -540,11 +522,12 @@ class LandsatLSTPredictor(pl.LightningModule):
                             vmin_pred = lst_masked.min()
                             vmax_pred = lst_masked.max()
                             im = ax.imshow(lst_masked, cmap='RdYlBu_r', vmin=vmin_pred, vmax=vmax_pred, alpha=0.9)
-                            ax.set_title(f'Prediction T={input_len+t+1}\n({vmin_pred:.1f}°F - {vmax_pred:.1f}°F)', fontsize=10)
+                            ax.set_title(f'Prediction T={input_len + t + 1}\n({vmin_pred:.1f}°F - {vmax_pred:.1f}°F)',
+                                         fontsize=10)
                             plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
                         else:
                             ax.imshow(np.zeros_like(lst_pred_fahrenheit), cmap='RdYlBu_r', alpha=0)
-                            ax.set_title(f'Prediction T={input_len+t+1}\n(No Valid Data)', fontsize=10)
+                            ax.set_title(f'Prediction T={input_len + t + 1}\n(No Valid Data)', fontsize=10)
 
                         ax.axis('off')
 
@@ -556,15 +539,16 @@ class LandsatLSTPredictor(pl.LightningModule):
 
                     # Add row labels
                     axes[0, 0].text(-0.2, 0.5, 'INPUT LST', rotation=90, ha='center', va='center',
-                                transform=axes[0, 0].transAxes, fontsize=12, fontweight='bold')
+                                    transform=axes[0, 0].transAxes, fontsize=12, fontweight='bold')
                     axes[1, 0].text(-0.2, 0.5, 'TARGET LST', rotation=90, ha='center', va='center',
-                                transform=axes[1, 0].transAxes, fontsize=12, fontweight='bold')
+                                    transform=axes[1, 0].transAxes, fontsize=12, fontweight='bold')
                     axes[2, 0].text(-0.2, 0.5, 'PREDICTED LST', rotation=90, ha='center', va='center',
-                                transform=axes[2, 0].transAxes, fontsize=12, fontweight='bold')
+                                    transform=axes[2, 0].transAxes, fontsize=12, fontweight='bold')
 
                     # Add title with sample information
-                    plt.suptitle(f'Validation Sample {sample_idx+1}/{num_samples_to_log} - Epoch {self.current_epoch}, Batch {batch_idx}\n'
-                                f'Input Length: {input_len}, Output Length: {output_len}', fontsize=12)
+                    plt.suptitle(
+                        f'Validation Sample {sample_idx + 1}/{num_samples_to_log} - Epoch {self.current_epoch}, Batch {batch_idx}\n'
+                        f'Input Length: {input_len}, Output Length: {output_len}', fontsize=12)
                     plt.tight_layout()
 
                     # Add this figure to our list
@@ -584,8 +568,6 @@ class LandsatLSTPredictor(pl.LightningModule):
                 traceback.print_exc()
 
         return loss
-
-
 
     def _get_sample_metadata(self, batch_idx: int, sample_idx: int) -> dict:
         """Get metadata for a specific sample in the batch"""
@@ -633,19 +615,10 @@ class LandsatLSTPredictor(pl.LightningModule):
 
     def test_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
         """Test step with proper masked loss usage and image logging similar to validation"""
+        self.eval()
         inputs, targets = batch
-        # metadata = self.extract_batch_metadata(batch_idx)
-        # print(metadata)
-
         predictions = self.forward(inputs)
-
-        def check_tensor(tensor, name):
-            has_nan = torch.isnan(tensor).any()
-            has_inf = torch.isinf(tensor).any()
-            print(f"{name} - NaN: {has_nan}, Inf: {has_inf}")
-        check_tensor(inputs, "inputs")
-        check_tensor(targets, "targets")
-        check_tensor(predictions, "predictions")
+        print("The output has nan:",torch.isnan(predictions).any())
 
         # Calculate masked loss (MSE) - this is what we return for optimization
         loss = self.masked_loss(predictions, targets)
@@ -687,7 +660,7 @@ class LandsatLSTPredictor(pl.LightningModule):
         # DIRECT IMAGE LOGGING IN TEST STEP (similar to validation_step)
         # Log images for first few batches to see model performance on test data
         if (batch_idx < 3 and  # Only first 3 batches
-            wandb.run is not None):  # Only if wandb is available
+                wandb.run is not None):  # Only if wandb is available
 
             try:
                 print(f"🖼️ Attempting to log test images at batch {batch_idx}")
@@ -698,16 +671,16 @@ class LandsatLSTPredictor(pl.LightningModule):
                 predictions_cpu = predictions[0:1].detach().float().cpu().numpy()
 
                 # Extract sequences
-                input_seq = inputs_cpu[0]    # [time, H, W, channels]
+                input_seq = inputs_cpu[0]  # [time, H, W, channels]
                 target_seq = targets_cpu[0]  # [time, H, W, 1]
-                pred_seq = predictions_cpu[0] # [time, H, W, 1]
+                pred_seq = predictions_cpu[0]  # [time, H, W, 1]
 
                 input_len = input_seq.shape[0]
                 output_len = target_seq.shape[0]
                 max_timesteps = max(input_len, output_len)
 
                 # Create the visualization
-                fig, axes = plt.subplots(3, max_timesteps, figsize=(4*max_timesteps, 12))
+                fig, axes = plt.subplots(3, max_timesteps, figsize=(4 * max_timesteps, 12))
 
                 # Handle single timestep case
                 if max_timesteps == 1:
@@ -731,11 +704,11 @@ class LandsatLSTPredictor(pl.LightningModule):
                         vmin_input = lst_masked.min()
                         vmax_input = lst_masked.max()
                         im = ax.imshow(lst_masked, cmap='RdYlBu_r', vmin=vmin_input, vmax=vmax_input, alpha=0.9)
-                        ax.set_title(f'Input T={t+1}\n({vmin_input:.1f}°F - {vmax_input:.1f}°F)', fontsize=10)
+                        ax.set_title(f'Input T={t + 1}\n({vmin_input:.1f}°F - {vmax_input:.1f}°F)', fontsize=10)
                         plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
                     else:
                         ax.imshow(np.zeros_like(lst_input_fahrenheit), cmap='RdYlBu_r', alpha=0)
-                        ax.set_title(f'Input T={t+1}\n(No Valid Data)', fontsize=10)
+                        ax.set_title(f'Input T={t + 1}\n(No Valid Data)', fontsize=10)
 
                     ax.axis('off')
 
@@ -760,11 +733,12 @@ class LandsatLSTPredictor(pl.LightningModule):
                         vmin_target = lst_masked.min()
                         vmax_target = lst_masked.max()
                         im = ax.imshow(lst_masked, cmap='RdYlBu_r', vmin=vmin_target, vmax=vmax_target, alpha=0.9)
-                        ax.set_title(f'Target T={input_len+t+1}\n({vmin_target:.1f}°F - {vmax_target:.1f}°F)', fontsize=10)
+                        ax.set_title(f'Target T={input_len + t + 1}\n({vmin_target:.1f}°F - {vmax_target:.1f}°F)',
+                                     fontsize=10)
                         plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
                     else:
                         ax.imshow(np.zeros_like(lst_target_fahrenheit), cmap='RdYlBu_r', alpha=0)
-                        ax.set_title(f'Target T={input_len+t+1}\n(No Valid Data)', fontsize=10)
+                        ax.set_title(f'Target T={input_len + t + 1}\n(No Valid Data)', fontsize=10)
 
                     ax.axis('off')
 
@@ -791,11 +765,12 @@ class LandsatLSTPredictor(pl.LightningModule):
                         vmin_pred = lst_masked.min()
                         vmax_pred = lst_masked.max()
                         im = ax.imshow(lst_masked, cmap='RdYlBu_r', vmin=vmin_pred, vmax=vmax_pred, alpha=0.9)
-                        ax.set_title(f'Prediction T={input_len+t+1}\n({vmin_pred:.1f}°F - {vmax_pred:.1f}°F)', fontsize=10)
+                        ax.set_title(f'Prediction T={input_len + t + 1}\n({vmin_pred:.1f}°F - {vmax_pred:.1f}°F)',
+                                     fontsize=10)
                         plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
                     else:
                         ax.imshow(np.zeros_like(lst_pred_fahrenheit), cmap='RdYlBu_r', alpha=0)
-                        ax.set_title(f'Prediction T={input_len+t+1}\n(No Valid Data)', fontsize=10)
+                        ax.set_title(f'Prediction T={input_len + t + 1}\n(No Valid Data)', fontsize=10)
 
                     ax.axis('off')
 
@@ -807,15 +782,15 @@ class LandsatLSTPredictor(pl.LightningModule):
 
                 # Add row labels
                 axes[0, 0].text(-0.2, 0.5, 'INPUT LST', rotation=90, ha='center', va='center',
-                            transform=axes[0, 0].transAxes, fontsize=12, fontweight='bold')
+                                transform=axes[0, 0].transAxes, fontsize=12, fontweight='bold')
                 axes[1, 0].text(-0.2, 0.5, 'TARGET LST', rotation=90, ha='center', va='center',
-                            transform=axes[1, 0].transAxes, fontsize=12, fontweight='bold')
+                                transform=axes[1, 0].transAxes, fontsize=12, fontweight='bold')
                 axes[2, 0].text(-0.2, 0.5, 'PREDICTED LST', rotation=90, ha='center', va='center',
-                            transform=axes[2, 0].transAxes, fontsize=12, fontweight='bold')
+                                transform=axes[2, 0].transAxes, fontsize=12, fontweight='bold')
 
                 # Add title with test-specific information
                 plt.suptitle(f'Test - Batch {batch_idx}\n'
-                            f'Input Length: {input_len}, Output Length: {output_len}', fontsize=12)
+                             f'Input Length: {input_len}, Output Length: {output_len}', fontsize=12)
                 plt.tight_layout()
 
                 # FIXED: Log directly to wandb WITHOUT specifying step

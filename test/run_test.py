@@ -51,7 +51,7 @@ def train_landsat_model(
     num_workers: int = 8,
     gpus: int = 1,
     device: int = -1,
-    precision: int = 16,
+    precision: int = 32,
     model_size: str = "medium",
     limit_train_batches: float = 1.0,
     limit_val_batches: float = 1.0,
@@ -232,7 +232,19 @@ def train_landsat_model(
     try:        
         print("\n🧪 Running final test...")
         try:
-            test_results = trainer.test(model, data_module, ckpt_path='/root/lst-earthformer/Personalized/Earthnet_No_Aux/all.ckpt')
+            print("\n🧪 Running test with checkpoint...")
+            checkpoint_path = '/root/lst-earthformer/Personalized/Earthnet_No_Aux/all.ckpt'
+            print("📂 Loading model from checkpoint...")
+            model_from_checkpoint = LandsatLSTPredictor.load_from_checkpoint(
+                checkpoint_path,
+                # Override any parameters that might be different
+                input_sequence_length=input_sequence_length,
+                output_sequence_length=output_sequence_length,
+                model_size=model_size,
+                # Add any other parameters that might have changed
+                strict=False  # Allow some mismatches
+            )
+            test_results = trainer.test(model_from_checkpoint, data_module)
             print(f"✅ Test completed: {test_results}")
         except Exception as e:
             print(f"⚠️ Test failed: {e}")
@@ -316,7 +328,7 @@ def main():
                         help="Number of GPUs to use")
     parser.add_argument("--device", type=int, default=-1,
                     help="Number of GPUs to use")
-    parser.add_argument("--precision", type=int, default=16, choices=[16, 32],
+    parser.add_argument("--precision", type=int, default=32, choices=[16, 32],
                         help="Training precision")
     parser.add_argument("--model_size", type=str, default="medium",
                     choices=["tiny", "small", "medium", "large", "earthnet"],

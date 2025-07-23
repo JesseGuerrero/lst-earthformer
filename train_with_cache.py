@@ -331,7 +331,7 @@ def main():
                         help="Number of GPUs to use")
     parser.add_argument("--device", type=int, default=-1,
                     help="Number of GPUs to use")
-    parser.add_argument("--precision", type=int, default=16, choices=[16, 32],
+    parser.add_argument("--precision", type=int, default=32, choices=[16, 32],
                         help="Training precision")
     parser.add_argument("--model_size", type=str, default="medium",
                     choices=["tiny", "small", "medium", "large", "earthnet"],
