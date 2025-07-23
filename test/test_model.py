@@ -669,18 +669,17 @@ class PersonalizedLandsatLSTPredictor(pl.LightningModule):
         predictions = torch.zeros_like(targets)
 
         for i, cluster_id in enumerate(cluster_ids):
+            # we want each cluster to predict its own cluster and the metrics to be for each model on its own cluster.
+            # Unless we specify to use the same model for all. But we also want the all model to have rmse for each cluster.
+            # At the end we compare the RMSE of the cluster models for their own clusters to the all model on that same cluster.
             if self.use_all:
                 cluster_id = "all"  # just use the one all model
             if cluster_id in self.cluster_models:
                 # Use cluster-specific model
+
                 sample_input = inputs[i:i + 1]  # Single sample
                 with torch.no_grad():
                     sample_pred = self.cluster_models[cluster_id](sample_input)
-                predictions[i:i + 1] = sample_pred
-            else:
-                # Fallback to main model
-                sample_input = inputs[i:i + 1]
-                sample_pred = self.forward(sample_input)
                 predictions[i:i + 1] = sample_pred
 
         # Calculate masked loss (MSE) - this is what we return for optimization
