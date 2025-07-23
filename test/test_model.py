@@ -9,7 +9,8 @@ from pathlib import Path
 from sklearn.metrics import r2_score
 import os
 import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(parent_dir)
 from model import LandsatLSTPredictor
 
 class PersonalizedLandsatLSTPredictor(pl.LightningModule):
@@ -654,7 +655,7 @@ class PersonalizedLandsatLSTPredictor(pl.LightningModule):
             return {}
 
     def test_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
-        """Test step with cluster-specific model routing"""
+        """Test step with cluster-specific model routing and image logging"""
         self.eval()
         inputs, targets = batch
         batch_size = inputs.shape[0]
@@ -678,15 +679,17 @@ class PersonalizedLandsatLSTPredictor(pl.LightningModule):
                 sample_pred = self.forward(sample_input)
                 predictions[i:i + 1] = sample_pred
 
-        # Rest of your existing test_step code (metrics, logging, etc.)
+        # Calculate masked loss (MSE) - this is what we return for optimization
         loss = self.masked_loss(predictions, targets)
-        mae = self.masked_mae(predictions, targets)
-        rmse = torch.sqrt(loss)
 
-        # Log overall metrics
-        self.log('test_loss', loss, on_step=False, on_epoch=True, sync_dist=True)
+        # Calculate additional masked metrics
+        mae = self.masked_mae(predictions, targets)
+        rmse = torch.sqrt(loss)  # RMSE is just sqrt of the MSE loss
+
+        # Log metrics - loss is already MSE, rmse is sqrt(MSE)
+        self.log('test_loss', loss, on_step=False, on_epoch=True, sync_dist=True)  # Log raw MSE loss
         self.log('test_mae', mae, on_step=False, on_epoch=True, sync_dist=True)
-        self.log('test_rmse', rmse, on_step=False, on_epoch=True, sync_dist=True)
+        self.log('test_rmse', rmse, on_step=False, on_epoch=True, sync_dist=True)  # Log RMSE
 
         # Log per-cluster metrics
         for cluster_id in ["1", "2", "3", "4"]:
@@ -696,20 +699,192 @@ class PersonalizedLandsatLSTPredictor(pl.LightningModule):
                 cluster_pred = predictions[cluster_indices]
                 cluster_true = targets[cluster_indices]
 
-                cluster_loss = self.masked_loss(cluster_pred, cluster_true)
-                self.log(f'test_rmse_cluster_{cluster_id}', torch.sqrt(cluster_loss),
+
+                # Fahrenheit space metrics
+                cluster_pred_f = cluster_pred * (211.0 - (-189.0)) + (-189.0)
+                cluster_true_f = cluster_true * (211.0 - (-189.0)) + (-189.0)
+
+                cluster_mae_f = self.masked_mae(cluster_pred_f, cluster_true_f)
+                cluster_rmse_f = torch.sqrt(self.masked_loss(cluster_pred_f, cluster_true_f))
+
+                self.log(f'test_mae_F_C{cluster_id}', cluster_mae_f,
+                         on_step=False, on_epoch=True, sync_dist=True)
+                self.log(f'test_rmse_F_C{cluster_id}', cluster_rmse_f,
                          on_step=False, on_epoch=True, sync_dist=True)
 
-        # Your existing Fahrenheit calculations and image logging code stays the same...
+        # Calculate metrics in Fahrenheit (similar to validation_step)
         with torch.no_grad():
+            # Denormalize to Fahrenheit: value * (max - min) + min
             pred_fahrenheit = predictions.detach() * (211.0 - (-189.0)) + (-189.0)
             true_fahrenheit = targets.detach() * (211.0 - (-189.0)) + (-189.0)
 
             temp_mae_f = self.masked_mae(pred_fahrenheit, true_fahrenheit)
             temp_rmse_f = torch.sqrt(self.masked_loss(pred_fahrenheit, true_fahrenheit))
 
-            self.log('test_mae_F', temp_mae_f, on_step=False, on_epoch=True, sync_dist=True)
-            self.log('test_rmse_F', temp_rmse_f, on_step=False, on_epoch=True, sync_dist=True)
+            # Log temperature metrics in Fahrenheit
+            self.log('test_mae_F_All', temp_mae_f, on_step=False, on_epoch=True, sync_dist=True)
+            self.log('test_rmse_F_All', temp_rmse_f, on_step=False, on_epoch=True, sync_dist=True)
+
+            # Calculate correlation (excluding NODATA)
+            pred_flat = pred_fahrenheit.flatten()
+            true_flat = true_fahrenheit.flatten()
+            valid_data_mask = (true_flat != 0) & (pred_flat != 0)  # Exclude NODATA
+            finite_mask = torch.isfinite(pred_flat) & torch.isfinite(true_flat)
+            mask = valid_data_mask & finite_mask
+
+            if mask.sum() > 1:
+                correlation = torch.corrcoef(torch.stack([pred_flat[mask], true_flat[mask]]))[0, 1]
+                if torch.isfinite(correlation):
+                    self.log('test_correlation', correlation, on_step=False, on_epoch=True, sync_dist=True)
+
+        # DIRECT IMAGE LOGGING IN TEST STEP (similar to validation_step)
+        # Log images for first few batches to see model performance on test data
+        if (batch_idx < 3 and  # Only first 3 batches
+                wandb.run is not None):  # Only if wandb is available
+
+            try:
+                print(f"🖼️ Attempting to log test images at batch {batch_idx}")
+
+                # Convert to CPU and numpy
+                inputs_cpu = inputs[0:1].float().cpu().numpy()  # Take only first sample
+                targets_cpu = targets[0:1].float().cpu().numpy()
+                predictions_cpu = predictions[0:1].detach().float().cpu().numpy()
+
+                # Extract sequences
+                input_seq = inputs_cpu[0]  # [time, H, W, channels]
+                target_seq = targets_cpu[0]  # [time, H, W, 1]
+                pred_seq = predictions_cpu[0]  # [time, H, W, 1]
+
+                input_len = input_seq.shape[0]
+                output_len = target_seq.shape[0]
+                max_timesteps = max(input_len, output_len)
+
+                # Create the visualization
+                fig, axes = plt.subplots(3, max_timesteps, figsize=(4 * max_timesteps, 12))
+
+                # Handle single timestep case
+                if max_timesteps == 1:
+                    axes = axes.reshape(3, 1)
+
+                fig.patch.set_facecolor('lightgray')
+
+                # Row 0: Input sequences (LST band - index 1)
+                for t in range(input_len):
+                    ax = axes[0, t]
+                    ax.set_facecolor('lightgray')
+
+                    lst_input = input_seq[t, :, :, 1]  # LST band
+                    lst_input_fahrenheit = lst_input * (211.0 - (-189.0)) + (-189.0)
+
+                    # Create mask for NODATA
+                    nodata_mask = np.abs(lst_input_fahrenheit - (-189.0)) < 0.1
+                    lst_masked = np.ma.masked_where(nodata_mask, lst_input_fahrenheit)
+
+                    if not lst_masked.mask.all():
+                        vmin_input = lst_masked.min()
+                        vmax_input = lst_masked.max()
+                        im = ax.imshow(lst_masked, cmap='RdYlBu_r', vmin=vmin_input, vmax=vmax_input, alpha=0.9)
+                        ax.set_title(f'Input T={t + 1}\n({vmin_input:.1f}°F - {vmax_input:.1f}°F)', fontsize=10)
+                        plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
+                    else:
+                        ax.imshow(np.zeros_like(lst_input_fahrenheit), cmap='RdYlBu_r', alpha=0)
+                        ax.set_title(f'Input T={t + 1}\n(No Valid Data)', fontsize=10)
+
+                    ax.axis('off')
+
+                # Fill remaining input columns
+                for t in range(input_len, max_timesteps):
+                    axes[0, t].set_facecolor('lightgray')
+                    axes[0, t].axis('off')
+                    axes[0, t].text(0.5, 0.5, 'N/A', ha='center', va='center', transform=axes[0, t].transAxes)
+
+                # Row 1: Target sequences
+                for t in range(output_len):
+                    ax = axes[1, t]
+                    ax.set_facecolor('lightgray')
+
+                    lst_target = target_seq[t, :, :, 0]
+                    lst_target_fahrenheit = lst_target * (211.0 - (-189.0)) + (-189.0)
+
+                    nodata_mask = np.abs(lst_target_fahrenheit - (-189.0)) < 0.1
+                    lst_masked = np.ma.masked_where(nodata_mask, lst_target_fahrenheit)
+
+                    if not lst_masked.mask.all():
+                        vmin_target = lst_masked.min()
+                        vmax_target = lst_masked.max()
+                        im = ax.imshow(lst_masked, cmap='RdYlBu_r', vmin=vmin_target, vmax=vmax_target, alpha=0.9)
+                        ax.set_title(f'Target T={input_len + t + 1}\n({vmin_target:.1f}°F - {vmax_target:.1f}°F)',
+                                     fontsize=10)
+                        plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
+                    else:
+                        ax.imshow(np.zeros_like(lst_target_fahrenheit), cmap='RdYlBu_r', alpha=0)
+                        ax.set_title(f'Target T={input_len + t + 1}\n(No Valid Data)', fontsize=10)
+
+                    ax.axis('off')
+
+                # Fill remaining target columns
+                for t in range(output_len, max_timesteps):
+                    axes[1, t].set_facecolor('lightgray')
+                    axes[1, t].axis('off')
+                    axes[1, t].text(0.5, 0.5, 'N/A', ha='center', va='center', transform=axes[1, t].transAxes)
+
+                # Row 2: Prediction sequences
+                for t in range(output_len):
+                    ax = axes[2, t]
+                    ax.set_facecolor('lightgray')
+
+                    lst_pred = pred_seq[t, :, :, 0]
+                    lst_pred_fahrenheit = lst_pred * (211.0 - (-189.0)) + (-189.0)
+
+                    # Use target's mask for predictions
+                    target_lst = target_seq[t, :, :, 0] * (211.0 - (-189.0)) + (-189.0)
+                    nodata_mask = np.abs(target_lst - (-189.0)) < 0.1
+                    lst_masked = np.ma.masked_where(nodata_mask, lst_pred_fahrenheit)
+
+                    if not lst_masked.mask.all():
+                        vmin_pred = lst_masked.min()
+                        vmax_pred = lst_masked.max()
+                        im = ax.imshow(lst_masked, cmap='RdYlBu_r', vmin=vmin_pred, vmax=vmax_pred, alpha=0.9)
+                        ax.set_title(f'Prediction T={input_len + t + 1}\n({vmin_pred:.1f}°F - {vmax_pred:.1f}°F)',
+                                     fontsize=10)
+                        plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
+                    else:
+                        ax.imshow(np.zeros_like(lst_pred_fahrenheit), cmap='RdYlBu_r', alpha=0)
+                        ax.set_title(f'Prediction T={input_len + t + 1}\n(No Valid Data)', fontsize=10)
+
+                    ax.axis('off')
+
+                # Fill remaining prediction columns
+                for t in range(output_len, max_timesteps):
+                    axes[2, t].set_facecolor('lightgray')
+                    axes[2, t].axis('off')
+                    axes[2, t].text(0.5, 0.5, 'N/A', ha='center', va='center', transform=axes[2, t].transAxes)
+
+                # Add row labels
+                axes[0, 0].text(-0.2, 0.5, 'INPUT LST', rotation=90, ha='center', va='center',
+                                transform=axes[0, 0].transAxes, fontsize=12, fontweight='bold')
+                axes[1, 0].text(-0.2, 0.5, 'TARGET LST', rotation=90, ha='center', va='center',
+                                transform=axes[1, 0].transAxes, fontsize=12, fontweight='bold')
+                axes[2, 0].text(-0.2, 0.5, 'PREDICTED LST', rotation=90, ha='center', va='center',
+                                transform=axes[2, 0].transAxes, fontsize=12, fontweight='bold')
+
+                # Add title with test-specific information
+                plt.suptitle(f'Test - Batch {batch_idx}\n'
+                             f'Input Length: {input_len}, Output Length: {output_len}', fontsize=12)
+                plt.tight_layout()
+
+                # FIXED: Log directly to wandb WITHOUT specifying step
+                wandb.log({
+                    "test_predictions": wandb.Image(fig)
+                })  # Removed step parameter to let wandb auto-increment
+
+                plt.close(fig)
+                print(f"✅ Successfully logged test image at batch {batch_idx}")
+
+            except Exception as e:
+                print(f"❌ Test image logging failed at batch {batch_idx}: {e}")
+                import traceback
+                traceback.print_exc()
 
         # Store predictions for correlation plot
         if self.trainer.is_global_zero and len(self.test_predictions) < 20:

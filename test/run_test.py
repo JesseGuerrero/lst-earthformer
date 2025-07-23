@@ -167,17 +167,6 @@ def train_landsat_model(
         except Exception as e:
             print(f"⚠️ Failed to send start alert: {e}")
     
-    # Initialize model
-    model = PersonalizedLandsatLSTPredictor(
-        learning_rate=learning_rate,
-        weight_decay=1e-5,
-        warmup_steps=1000,
-        max_epochs=max_epochs,        
-        input_sequence_length=input_sequence_length,
-        output_sequence_length=output_sequence_length,
-        model_size=model_size
-    )
-    
     # Callbacks
     checkpoint_callback = ModelCheckpoint(
         dirpath=checkpoint_dir,
@@ -234,9 +223,8 @@ def train_landsat_model(
         try:
             print("\n🧪 Running test with checkpoint...")
             checkpoint_path = '/root/lst-earthformer/Personalized/Earthnet_No_Aux/all.ckpt'
-            print("📂 Loading model from checkpoint...")
-            model_from_checkpoint = LandsatLSTPredictor.load_from_checkpoint(
-                checkpoint_path,
+            print("📂 Loading model from checkpoints...")
+            model_from_checkpoint = PersonalizedLandsatLSTPredictor(
                 # Override any parameters that might be different
                 input_sequence_length=input_sequence_length,
                 output_sequence_length=output_sequence_length,
