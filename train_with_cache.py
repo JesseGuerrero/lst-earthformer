@@ -51,7 +51,7 @@ def train_landsat_model(
     num_workers: int = 8,
     gpus: int = 1,
     device: int = -1,
-    precision: int = 16,
+    precision: int = 32,
     model_size: str = "medium",
     limit_train_batches: float = 1.0,
     limit_val_batches: float = 1.0,
