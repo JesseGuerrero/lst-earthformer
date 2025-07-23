@@ -20,7 +20,7 @@ from pathlib import Path
 # Add current directory to path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from test_model import LandsatLSTPredictor
+from test_model import PersonalizedLandsatLSTPredictor
 from test_dataset import LandsatDataModule
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
@@ -168,7 +168,7 @@ def train_landsat_model(
             print(f"⚠️ Failed to send start alert: {e}")
     
     # Initialize model
-    model = LandsatLSTPredictor(
+    model = PersonalizedLandsatLSTPredictor(
         learning_rate=learning_rate,
         weight_decay=1e-5,
         warmup_steps=1000,
