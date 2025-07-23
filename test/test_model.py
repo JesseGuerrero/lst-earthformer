@@ -658,7 +658,7 @@ class PersonalizedLandsatLSTPredictor(pl.LightningModule):
         """Test step with cluster-specific model routing and image logging"""
         self.eval()
         inputs, targets = batch
-        batch_size = inputs.shape[0]
+        batch_size = 1 # batch size is always one to keep cluster calculations simple
 
         # Get cluster IDs for this batch
         cluster_ids = self._get_cluster_ids(batch_idx, batch_size)

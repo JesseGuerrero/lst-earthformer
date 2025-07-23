@@ -65,7 +65,7 @@ def train_landsat_model(
         Dataset parameters match setup_data.py exactly for cache compatibility.
         Training parameters control the actual training process.
     """
-    batch_size = 1
+    batch_size = 1 # batch size is always one while testing
     hyperparameters = {
         # Dataset parameters
         "dataset_root": dataset_root,
