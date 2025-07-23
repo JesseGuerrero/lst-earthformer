@@ -271,6 +271,8 @@ class LandsatSequenceDataset(Dataset):
         city_sequences = []
         
         available_tiles = self._get_available_rows_cols(city) # Processes only DEM for rows and cols
+        # Each folder 1-4 is a distinct cluster based on its LCZ, meaning each city may contains portions LCZ 1,2,3 but not 4.
+        # We can rely on the folder to distinguish this.
         for cluster in ["1", "2", "3", "4"]:
             monthly_scenes = self._get_monthly_scenes(cluster, city)
             min_required_scenes = 2
