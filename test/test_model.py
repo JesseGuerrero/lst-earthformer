@@ -50,6 +50,8 @@ class PersonalizedLandsatLSTPredictor(pl.LightningModule):
         self.cluster_models = {}
         self.checkpoint_dir = Path("/root/lst-earthformer/Personalized/Earthnet_No_Aux")
         self._load_cluster_models()
+        self.cluster_predictions = {"1": [], "2": [], "3": [], "4": []}
+        self.cluster_targets = {"1": [], "2": [], "3": [], "4": []}
 
         # Model size configurations
         model_configs = {
@@ -655,7 +657,7 @@ class PersonalizedLandsatLSTPredictor(pl.LightningModule):
             return {}
 
     def test_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
-        """Test step with cluster-specific model routing and simple cluster metrics"""
+        """Test step with cluster-specific model routing and proper cluster metrics aggregation"""
         self.eval()
         inputs, targets = batch
         batch_size = 1  # batch size is always one to keep cluster calculations simple
@@ -673,7 +675,7 @@ class PersonalizedLandsatLSTPredictor(pl.LightningModule):
                 # Use cluster-specific model
                 sample_input = inputs[i:i + 1]  # Single sample
                 with torch.no_grad():
-                    sample_pred = self.cluster_models[cluster_id](sample_input)  # this is the model forward
+                    sample_pred = self.cluster_models[cluster_id](sample_input)
                 predictions[i:i + 1] = sample_pred
             else:
                 # Fallback to main model
@@ -688,12 +690,12 @@ class PersonalizedLandsatLSTPredictor(pl.LightningModule):
         mae = self.masked_mae(predictions, targets)
         rmse = torch.sqrt(loss)  # RMSE is just sqrt of the MSE loss
 
-        # Log overall metrics - loss is already MSE, rmse is sqrt(MSE)
-        self.log('test_loss', loss, on_step=False, on_epoch=True, sync_dist=True)  # Log raw MSE loss
+        # Log overall metrics
+        self.log('test_loss', loss, on_step=False, on_epoch=True, sync_dist=True)
         self.log('test_mae', mae, on_step=False, on_epoch=True, sync_dist=True)
-        self.log('test_rmse', rmse, on_step=False, on_epoch=True, sync_dist=True)  # Log RMSE
+        self.log('test_rmse', rmse, on_step=False, on_epoch=True, sync_dist=True)
 
-        # Calculate metrics in Fahrenheit (similar to validation_step)
+        # Calculate metrics in Fahrenheit
         with torch.no_grad():
             # Denormalize to Fahrenheit: value * (max - min) + min
             pred_fahrenheit = predictions.detach() * (211.0 - (-189.0)) + (-189.0)
@@ -706,13 +708,12 @@ class PersonalizedLandsatLSTPredictor(pl.LightningModule):
             self.log('test_mae_F_All', temp_mae_f, on_step=False, on_epoch=True, sync_dist=True)
             self.log('test_rmse_F_All', temp_rmse_f, on_step=False, on_epoch=True, sync_dist=True)
 
-            # Log cluster-specific metrics for current batch (PyTorch Lightning will aggregate)
+            # Store cluster-specific predictions and targets for end-of-epoch aggregation
             current_cluster = cluster_ids[0]  # Since batch_size=1, only one cluster per batch
             if current_cluster in ["1", "2", "3", "4"]:
-                self.log(f'test_mae_F_C{current_cluster}', temp_mae_f,
-                         on_step=False, on_epoch=True, sync_dist=True)
-                self.log(f'test_rmse_F_C{current_cluster}', temp_rmse_f,
-                         on_step=False, on_epoch=True, sync_dist=True)
+                # Store predictions and targets for this cluster
+                self.cluster_predictions[current_cluster].append(pred_fahrenheit.detach().cpu())
+                self.cluster_targets[current_cluster].append(true_fahrenheit.detach().cpu())
 
             # Calculate correlation (excluding NODATA)
             pred_flat = pred_fahrenheit.flatten()
@@ -726,166 +727,83 @@ class PersonalizedLandsatLSTPredictor(pl.LightningModule):
                 if torch.isfinite(correlation):
                     self.log('test_correlation', correlation, on_step=False, on_epoch=True, sync_dist=True)
 
-                    # Also log cluster-specific correlation
-                    if current_cluster in ["1", "2", "3", "4"]:
-                        self.log(f'test_correlation_C{current_cluster}', correlation,
-                                 on_step=False, on_epoch=True, sync_dist=True)
+        # [Rest of your image logging code remains the same...]
 
-        # DIRECT IMAGE LOGGING IN TEST STEP (similar to validation_step)
-        # Log images for first few batches to see model performance on test data
-        if (batch_idx < 3 and  # Only first 3 batches
-                wandb.run is not None):  # Only if wandb is available
-
-            try:
-                print(f"🖼️ Attempting to log test images at batch {batch_idx}")
-
-                # Convert to CPU and numpy
-                inputs_cpu = inputs[0:1].float().cpu().numpy()  # Take only first sample
-                targets_cpu = targets[0:1].float().cpu().numpy()
-                predictions_cpu = predictions[0:1].detach().float().cpu().numpy()
-
-                # Extract sequences
-                input_seq = inputs_cpu[0]  # [time, H, W, channels]
-                target_seq = targets_cpu[0]  # [time, H, W, 1]
-                pred_seq = predictions_cpu[0]  # [time, H, W, 1]
-
-                input_len = input_seq.shape[0]
-                output_len = target_seq.shape[0]
-                max_timesteps = max(input_len, output_len)
-
-                # Create the visualization
-                fig, axes = plt.subplots(3, max_timesteps, figsize=(4 * max_timesteps, 12))
-
-                # Handle single timestep case
-                if max_timesteps == 1:
-                    axes = axes.reshape(3, 1)
-
-                fig.patch.set_facecolor('lightgray')
-
-                # Row 0: Input sequences (LST band - index 1)
-                for t in range(input_len):
-                    ax = axes[0, t]
-                    ax.set_facecolor('lightgray')
-
-                    lst_input = input_seq[t, :, :, 1]  # LST band
-                    lst_input_fahrenheit = lst_input * (211.0 - (-189.0)) + (-189.0)
-
-                    # Create mask for NODATA
-                    nodata_mask = np.abs(lst_input_fahrenheit - (-189.0)) < 0.1
-                    lst_masked = np.ma.masked_where(nodata_mask, lst_input_fahrenheit)
-
-                    if not lst_masked.mask.all():
-                        vmin_input = lst_masked.min()
-                        vmax_input = lst_masked.max()
-                        im = ax.imshow(lst_masked, cmap='RdYlBu_r', vmin=vmin_input, vmax=vmax_input, alpha=0.9)
-                        ax.set_title(f'Input T={t + 1}\n({vmin_input:.1f}°F - {vmax_input:.1f}°F)', fontsize=10)
-                        plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
-                    else:
-                        ax.imshow(np.zeros_like(lst_input_fahrenheit), cmap='RdYlBu_r', alpha=0)
-                        ax.set_title(f'Input T={t + 1}\n(No Valid Data)', fontsize=10)
-
-                    ax.axis('off')
-
-                # Fill remaining input columns
-                for t in range(input_len, max_timesteps):
-                    axes[0, t].set_facecolor('lightgray')
-                    axes[0, t].axis('off')
-                    axes[0, t].text(0.5, 0.5, 'N/A', ha='center', va='center', transform=axes[0, t].transAxes)
-
-                # Row 1: Target sequences
-                for t in range(output_len):
-                    ax = axes[1, t]
-                    ax.set_facecolor('lightgray')
-
-                    lst_target = target_seq[t, :, :, 0]
-                    lst_target_fahrenheit = lst_target * (211.0 - (-189.0)) + (-189.0)
-
-                    nodata_mask = np.abs(lst_target_fahrenheit - (-189.0)) < 0.1
-                    lst_masked = np.ma.masked_where(nodata_mask, lst_target_fahrenheit)
-
-                    if not lst_masked.mask.all():
-                        vmin_target = lst_masked.min()
-                        vmax_target = lst_masked.max()
-                        im = ax.imshow(lst_masked, cmap='RdYlBu_r', vmin=vmin_target, vmax=vmax_target, alpha=0.9)
-                        ax.set_title(f'Target T={input_len + t + 1}\n({vmin_target:.1f}°F - {vmax_target:.1f}°F)',
-                                     fontsize=10)
-                        plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
-                    else:
-                        ax.imshow(np.zeros_like(lst_target_fahrenheit), cmap='RdYlBu_r', alpha=0)
-                        ax.set_title(f'Target T={input_len + t + 1}\n(No Valid Data)', fontsize=10)
-
-                    ax.axis('off')
-
-                # Fill remaining target columns
-                for t in range(output_len, max_timesteps):
-                    axes[1, t].set_facecolor('lightgray')
-                    axes[1, t].axis('off')
-                    axes[1, t].text(0.5, 0.5, 'N/A', ha='center', va='center', transform=axes[1, t].transAxes)
-
-                # Row 2: Prediction sequences
-                for t in range(output_len):
-                    ax = axes[2, t]
-                    ax.set_facecolor('lightgray')
-
-                    lst_pred = pred_seq[t, :, :, 0]
-                    lst_pred_fahrenheit = lst_pred * (211.0 - (-189.0)) + (-189.0)
-
-                    # Use target's mask for predictions
-                    target_lst = target_seq[t, :, :, 0] * (211.0 - (-189.0)) + (-189.0)
-                    nodata_mask = np.abs(target_lst - (-189.0)) < 0.1
-                    lst_masked = np.ma.masked_where(nodata_mask, lst_pred_fahrenheit)
-
-                    if not lst_masked.mask.all():
-                        vmin_pred = lst_masked.min()
-                        vmax_pred = lst_masked.max()
-                        im = ax.imshow(lst_masked, cmap='RdYlBu_r', vmin=vmin_pred, vmax=vmax_pred, alpha=0.9)
-                        ax.set_title(f'Prediction T={input_len + t + 1}\n({vmin_pred:.1f}°F - {vmax_pred:.1f}°F)',
-                                     fontsize=10)
-                        plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
-                    else:
-                        ax.imshow(np.zeros_like(lst_pred_fahrenheit), cmap='RdYlBu_r', alpha=0)
-                        ax.set_title(f'Prediction T={input_len + t + 1}\n(No Valid Data)', fontsize=10)
-
-                    ax.axis('off')
-
-                # Fill remaining prediction columns
-                for t in range(output_len, max_timesteps):
-                    axes[2, t].set_facecolor('lightgray')
-                    axes[2, t].axis('off')
-                    axes[2, t].text(0.5, 0.5, 'N/A', ha='center', va='center', transform=axes[2, t].transAxes)
-
-                # Add row labels
-                axes[0, 0].text(-0.2, 0.5, 'INPUT LST', rotation=90, ha='center', va='center',
-                                transform=axes[0, 0].transAxes, fontsize=12, fontweight='bold')
-                axes[1, 0].text(-0.2, 0.5, 'TARGET LST', rotation=90, ha='center', va='center',
-                                transform=axes[1, 0].transAxes, fontsize=12, fontweight='bold')
-                axes[2, 0].text(-0.2, 0.5, 'PREDICTED LST', rotation=90, ha='center', va='center',
-                                transform=axes[2, 0].transAxes, fontsize=12, fontweight='bold')
-
-                # Add title with test-specific information
-                plt.suptitle(f'Test - Batch {batch_idx} - Cluster {current_cluster}\n'
-                             f'Input Length: {input_len}, Output Length: {output_len}', fontsize=12)
-                plt.tight_layout()
-
-                # Log directly to wandb
-                wandb.log({
-                    "test_predictions": wandb.Image(fig)
-                })
-
-                plt.close(fig)
-                print(f"✅ Successfully logged test image at batch {batch_idx}")
-
-            except Exception as e:
-                print(f"❌ Test image logging failed at batch {batch_idx}: {e}")
-                import traceback
-                traceback.print_exc()
-
-        # Store predictions for correlation plot
+        # Store predictions for overall correlation plot
         if self.trainer.is_global_zero and len(self.test_predictions) < 20:
             self.test_predictions.append(predictions.detach().cpu())
             self.test_targets.append(targets.detach().cpu())
 
         return loss
+
+    def on_test_epoch_end(self):
+        """Calculate cluster-specific metrics and create correlation plot at end of test epoch"""
+        print("test epoch end ran")
+
+        # Only calculate and log from rank 0 in distributed training
+        if self.trainer.is_global_zero:
+
+            # Calculate cluster-specific metrics
+            for cluster_id in ["1", "2", "3", "4"]:
+                if (len(self.cluster_predictions[cluster_id]) > 0 and
+                        len(self.cluster_targets[cluster_id]) > 0):
+
+                    # Concatenate all predictions and targets for this cluster
+                    cluster_preds = torch.cat(self.cluster_predictions[cluster_id])
+                    cluster_targets = torch.cat(self.cluster_targets[cluster_id])
+
+                    # Calculate cluster-specific metrics
+                    cluster_mae = self.masked_mae(cluster_preds, cluster_targets)
+                    cluster_rmse = torch.sqrt(self.masked_loss(cluster_preds, cluster_targets))
+
+                    # Log cluster-specific metrics
+                    if wandb.run is not None:
+                        wandb.log({
+                            f'test_mae_F_C{cluster_id}': cluster_mae.item(),
+                            f'test_rmse_F_C{cluster_id}': cluster_rmse.item()
+                        })
+
+                    print(f"Cluster {cluster_id}: MAE = {cluster_mae:.2f}°F, RMSE = {cluster_rmse:.2f}°F "
+                          f"({len(self.cluster_predictions[cluster_id])} samples)")
+
+                    # Calculate cluster-specific correlation
+                    pred_flat = cluster_preds.flatten()
+                    true_flat = cluster_targets.flatten()
+                    valid_data_mask = (true_flat != 0) & (pred_flat != 0)
+                    finite_mask = torch.isfinite(pred_flat) & torch.isfinite(true_flat)
+                    mask = valid_data_mask & finite_mask
+
+                    if mask.sum() > 1:
+                        correlation = torch.corrcoef(torch.stack([pred_flat[mask], true_flat[mask]]))[0, 1]
+                        if torch.isfinite(correlation):
+                            if wandb.run is not None:
+                                wandb.log({f'test_correlation_C{cluster_id}': correlation.item()})
+                            print(f"Cluster {cluster_id}: Correlation = {correlation:.3f}")
+
+            # Create overall correlation plot
+            if len(self.test_predictions) > 0 and wandb.run is not None:
+                try:
+                    fig = self.create_correlation_plot(
+                        self.test_predictions, self.test_targets,
+                        "test", self.current_epoch
+                    )
+                    if fig is not None:
+                        wandb.log({
+                            "test_correlation_plot": wandb.Image(fig),
+                            "epoch": self.current_epoch
+                        })
+                        plt.close(fig)
+                        print(f"✅ Logged test correlation plot for epoch {self.current_epoch}")
+                except Exception as e:
+                    print(f"❌ Failed to create test correlation plot: {e}")
+
+        # Clear stored data on all ranks
+        self.test_predictions = []
+        self.test_targets = []
+        # Clear cluster-specific data
+        for cluster_id in ["1", "2", "3", "4"]:
+            self.cluster_predictions[cluster_id] = []
+            self.cluster_targets[cluster_id] = []
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
@@ -957,27 +875,3 @@ class PersonalizedLandsatLSTPredictor(pl.LightningModule):
         # Clear stored data on all ranks
         self.val_predictions = []
         self.val_targets = []
-
-    def on_test_epoch_end(self):
-        print("test epoch end ran")
-        """Create correlation plot at end of test epoch"""
-        # Only log from rank 0 in distributed training
-        if self.trainer.is_global_zero and len(self.test_predictions) > 0 and wandb.run is not None:
-            try:
-                fig = self.create_correlation_plot(
-                    self.test_predictions, self.test_targets,
-                    "test", self.current_epoch
-                )
-                if fig is not None:
-                    wandb.log({
-                        "test_correlation_plot": wandb.Image(fig),
-                        "epoch": self.current_epoch
-                    })
-                    plt.close(fig)
-                    print(f"✅ Logged test correlation plot for epoch {self.current_epoch}")
-            except Exception as e:
-                print(f"❌ Failed to create test correlation plot: {e}")
-
-        # Clear stored data on all ranks
-        self.test_predictions = []
-        self.test_targets = []
