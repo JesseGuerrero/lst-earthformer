@@ -124,7 +124,7 @@ class LandsatSequenceDataset(Dataset):
         
         return cache_filename
 
-    def _load_sequences_from_cache(self) -> Optional[List[Tuple[str, int, int, List[str], List[str]]]]:
+    def _load_sequences_from_cache(self) -> Optional[List[Tuple[str, str, int, int, List[str], List[str]]]]:
         """Try to load sequences from cache"""
         cache_file = self._get_cache_filename()
         
@@ -520,7 +520,7 @@ class LandsatSequenceDataset(Dataset):
         tif_files = list(scene_dir.glob("*.tif"))
         return len(tif_files) > 0
     
-    def _build_tile_sequences(self) -> List[Tuple[str, int, int, List[str], List[str]]]:
+    def _build_tile_sequences(self) -> List[Tuple[str, str, int, int, List[str], List[str]]]:
         """Build consecutive monthly sequences for each tile position, with caching support"""
         
         # Try to load from cache first
