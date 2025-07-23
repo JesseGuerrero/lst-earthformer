@@ -273,11 +273,10 @@ class LandsatSequenceDataset(Dataset):
         available_tiles = self._get_available_rows_cols(city) # Processes only DEM for rows and cols
         for cluster in ["1", "2", "3", "4"]:
             monthly_scenes = self._get_monthly_scenes(cluster, city)
-
             min_required_scenes = 2
 
             if len(monthly_scenes) < min_required_scenes:
-                return city_sequences
+                continue
 
             sorted_months = sorted(monthly_scenes.keys())
 
@@ -513,6 +512,21 @@ class LandsatSequenceDataset(Dataset):
                 continue
 
         self._monthly_scenes_cache[cluster][city] = monthly_scenes
+        '''
+        {
+            "1": {
+                "San Antonio": {
+                    "2013-04": "scene_path",
+                    "2013-05": "scene_path",
+                    "2013-06": "scene_path",
+                    etc...
+                    "2025-04": "scene_path",
+                    "2025-05": "scene_path",
+                    "2025-06": "scene_path",
+                }
+            }
+        }
+        '''
         return monthly_scenes
     
     def _validate_tiled_scene(self, scene_dir: Path) -> bool:
