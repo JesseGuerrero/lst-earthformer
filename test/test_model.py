@@ -243,7 +243,7 @@ class LandsatLSTPredictor(pl.LightningModule):
                 if sample_idx < len(dataset):
                     # Get the tile sequence info from dataset
                     if hasattr(dataset, 'tile_sequences') and sample_idx < len(dataset.tile_sequences):
-                        city, tile_row, tile_col, input_months, output_months = dataset.tile_sequences[sample_idx]
+                        cluster, city, tile_row, tile_col, input_months, output_months = dataset.tile_sequences[sample_idx]
 
                         sample_metadata = {
                             'sample_idx': sample_idx,
@@ -256,7 +256,8 @@ class LandsatLSTPredictor(pl.LightningModule):
                             'input_date_range': f"{input_months[0]} to {input_months[-1]}",
                             'output_date_range': f"{output_months[0]} to {output_months[-1]}",
                             'sequence_length': len(input_months),
-                            'file_paths': self._get_file_paths(city, tile_row, tile_col, input_months + output_months)
+                            # 'file_paths': self._get_file_paths(city, tile_row, tile_col, input_months + output_months),
+                            'cluster': cluster
                         }
                         metadata['samples_metadata'].append(sample_metadata)
 
@@ -269,31 +270,31 @@ class LandsatLSTPredictor(pl.LightningModule):
             'note': 'Limited metadata - dataset info not accessible'
         }
 
-    def _get_file_paths(self, city: str, tile_row: int, tile_col: int, months: List[str]) -> Dict[str, List[str]]:
-        """Get file paths for the tiles used in this sequence"""
-        if not hasattr(self.trainer, 'datamodule'):
-            return {}
-
-        file_paths = {
-            'dem_path': str(self.dataset_root / "DEM_2014_Tiles" / city / f"DEM_row_{tile_row:03d}_col_{tile_col:03d}.tif"),
-            'monthly_scenes': {}
-        }
-
-        # Get paths for each month's tiles
-        for month in months:
-            monthly_scenes = self._get_monthly_scenes_for_city(city)
-            if month in monthly_scenes:
-                scene_dir = Path(monthly_scenes[month])
-                month_paths = {}
-
-                band_names = ['LST', 'red', 'green', 'blue', 'ndvi', 'ndwi', 'ndbi', 'albedo']
-                for band in band_names:
-                    tile_path = scene_dir / f"{band}_row_{tile_row:03d}_col_{tile_col:03d}.tif"
-                    month_paths[band] = str(tile_path)
-
-                file_paths['monthly_scenes'][month] = month_paths
-
-        return file_paths
+    # def _get_file_paths(self, city: str, tile_row: int, tile_col: int, months: List[str]) -> Dict[str, List[str]]:
+    #     """Get file paths for the tiles used in this sequence"""
+    #     if not hasattr(self.trainer, 'datamodule'):
+    #         return {}
+    #
+    #     file_paths = {
+    #         'dem_path': str(self.dataset_root / "DEM_2014_Tiles" / city / f"DEM_row_{tile_row:03d}_col_{tile_col:03d}.tif"),
+    #         'monthly_scenes': {}
+    #     }
+    #
+    #     # Get paths for each month's tiles
+    #     for month in months:
+    #         monthly_scenes = self._get_monthly_scenes_for_city(city)
+    #         if month in monthly_scenes:
+    #             scene_dir = Path(monthly_scenes[month])
+    #             month_paths = {}
+    #
+    #             band_names = ['LST', 'red', 'green', 'blue', 'ndvi', 'ndwi', 'ndbi', 'albedo']
+    #             for band in band_names:
+    #                 tile_path = scene_dir / f"{band}_row_{tile_row:03d}_col_{tile_col:03d}.tif"
+    #                 month_paths[band] = str(tile_path)
+    #
+    #             file_paths['monthly_scenes'][month] = month_paths
+    #
+    #     return file_paths
 
     def _get_monthly_scenes(self, cluster: str, city: str) -> Dict[str, Dict[str, str]]:
         city_dir = self.dataset_root / "Clustered" / cluster / "Cities_Tiles" / city
