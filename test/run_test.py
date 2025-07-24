@@ -367,6 +367,7 @@ def main():
             debug_monthly_split=debug_monthly_split,
             debug_year=args.debug_year,
             max_input_nodata_pct=args.max_nodata,
+            use_all=args.use_all,
             
             # Training parameters
             wandb_project=args.wandb_project,

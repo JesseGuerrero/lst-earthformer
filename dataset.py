@@ -82,9 +82,9 @@ class LandsatSequenceDataset(Dataset):
             if channel_to_remove in self.input_band_names:
                 self.input_band_names.remove(channel_to_remove)
 
-        print(f"Input bands: {self.input_band_names}")
-        print(f"Output bands: {self.output_band_names}")
-        print(f"Remove LST from input: {self.remove_lst}")
+        # print(f"Input bands: {self.input_band_names}")
+        # print(f"Output bands: {self.output_band_names}")
+        # print(f"Remove LST from input: {self.remove_lst}")
         
         # Build tile sequences
         self.tile_sequences = self._build_tile_sequences()
@@ -724,7 +724,7 @@ class LandsatSequenceDataset(Dataset):
 
         # Stack to (H, W, C)
         scene_data = np.stack(bands, axis=-1)
-        print(f"Debug: Loaded scene with shape {scene_data.shape} for {'input' if is_input else 'output'}")
+        # print(f"Debug: Loaded scene with shape {scene_data.shape} for {'input' if is_input else 'output'}")
         return scene_data
     
     def __len__(self) -> int:
