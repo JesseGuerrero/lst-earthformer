@@ -74,12 +74,17 @@ class LandsatSequenceDataset(Dataset):
         
         self.cities = self._get_all_cities()
         self.remove_lst=False
-        self.band_names = ['DEM', 'LST', 'red', 'green', 'blue', 'ndvi', 'ndwi', 'ndbi', 'albedo']
+        self.input_band_names = ['DEM', 'LST', 'red', 'green', 'blue', 'ndvi', 'ndwi', 'ndbi', 'albedo']
+        self.output_band_names = ['LST']  # Always LST for output
         for channel_to_remove in self.remove_channels:
             if channel_to_remove == "LST":
                 self.remove_lst = True
-            elif channel_to_remove in self.band_names:
-                self.band_names.remove(channel_to_remove)
+            if channel_to_remove in self.input_band_names:
+                self.input_band_names.remove(channel_to_remove)
+
+        print(f"Input bands: {self.input_band_names}")
+        print(f"Output bands: {self.output_band_names}")
+        print(f"Remove LST from input: {self.remove_lst}")
         
         # Build tile sequences
         self.tile_sequences = self._build_tile_sequences()
@@ -176,24 +181,30 @@ class LandsatSequenceDataset(Dataset):
             print(f"⚠️ Failed to load cache ({e})")
             print(f"💡 Try rebuilding cache with setup_data.py")
             return None
-        
-    
-    def _normalize_scene(self, scene_data: np.ndarray) -> np.ndarray:
+
+    def _normalize_scene(self, scene_data: np.ndarray, is_input: bool = True) -> np.ndarray:
         """Normalize scene data to [0, 1] range using predefined ranges"""
         normalized_scene = scene_data.copy()
-        
-        for i, band_name in enumerate(self.band_names):
+
+        # Choose the appropriate band names based on input/output
+        band_names = self.input_band_names if is_input else self.output_band_names
+
+        for i, band_name in enumerate(band_names):
+            if i >= scene_data.shape[2]:  # Safety check
+                break
+
             band_data = scene_data[:, :, i]
             band_range = BAND_RANGES[band_name]
-            
+
             # Normalize to [0, 1], keeping NODATA as 0
             valid_mask = band_data != 0
             normalized_band = np.zeros_like(band_data, dtype=np.float32)
-            normalized_band[valid_mask] = (band_data[valid_mask] - band_range["min"]) / (band_range["max"] - band_range["min"])
+            normalized_band[valid_mask] = (band_data[valid_mask] - band_range["min"]) / (
+                        band_range["max"] - band_range["min"])
             normalized_band = np.clip(normalized_band, 0, 1)
-            
+
             normalized_scene[:, :, i] = normalized_band
-        
+
         return normalized_scene
     
     def _generate_consecutive_sequences(self, city: str, tile_row: int, tile_col: int, 
@@ -339,9 +350,7 @@ class LandsatSequenceDataset(Dataset):
                 scene_dir = Path(monthly_scenes[month])
                 
                 # Check each band for this timestep
-                for band_name in self.band_names:
-                    if self.remove_lst and band_name == "LST":
-                        continue
+                for band_name in self.input_band_names:
                     tile_path = scene_dir / f"{band_name}_row_{tile_row:03d}_col_{tile_col:03d}.tif"
                     
                     if not tile_path.exists():
@@ -629,6 +638,7 @@ class LandsatSequenceDataset(Dataset):
         """Verify using cached scene validation"""
         cache_key = (city, tile_row, tile_col)
         
+
         if cache_key not in self._scene_validation_cache:
             monthly_scenes = self._get_monthly_scenes(city)
             valid_months = set()
@@ -693,27 +703,28 @@ class LandsatSequenceDataset(Dataset):
         # Cache the result (DEM is static and reused frequently)
         self._dem_cache[cache_key] = dem_data
         return dem_data
-    
+
     def _load_scene_tile(self, is_input: bool, city: str, month: str, tile_row: int, tile_col: int) -> np.ndarray:
         """Load all bands for a scene tile"""
         monthly_scenes = self._get_monthly_scenes(city)
         scene_dir = Path(monthly_scenes[month])
 
+        # Choose the appropriate band list
+        band_names = self.input_band_names if is_input else self.output_band_names
+
         bands = []
-        for band_name in self.band_names:
+        for band_name in band_names:
             if band_name == 'DEM':
                 dem = self._load_dem_tile(city, tile_row, tile_col)
                 bands.append(dem)
-            elif is_input and self.remove_lst and band_name == "LST":
-                # Skip LST band for input sequences when remove_lst is True
-                continue
             else:
                 tile_path = scene_dir / f"{band_name}_row_{tile_row:03d}_col_{tile_col:03d}.tif"
                 band_data = self._load_raster(str(tile_path))
                 bands.append(band_data)
-        
+
         # Stack to (H, W, C)
         scene_data = np.stack(bands, axis=-1)
+        print(f"Debug: Loaded scene with shape {scene_data.shape} for {'input' if is_input else 'output'}")
         return scene_data
     
     def __len__(self) -> int:
@@ -788,7 +799,6 @@ class LandsatSequenceDataset(Dataset):
                                           months: List[str], monthly_scenes: Dict[str, str],
                                           is_output: bool = False) -> List[np.ndarray]:
         """Load a sequence of scenes with interpolation for missing months"""
-        scenes = []
         monthly_scenes_for_city = monthly_scenes
 
         # First, load all existing scenes
@@ -797,26 +807,9 @@ class LandsatSequenceDataset(Dataset):
             if month in monthly_scenes_for_city:
                 try:
                     is_input = not is_output
-                    scene = self._load_scene_tile(is_input, city, month, tile_row, tile_col) # if its not output then its input
+                    scene = self._load_scene_tile(is_input, city, month, tile_row, tile_col)
                     if scene is not None:
-                        normalized_scene = self._normalize_scene(scene)
-                        if is_output:
-                            # Find LST band index in the remaining channels
-                            lst_band_idx = None
-                            current_idx = 0
-                            for band_name in self.band_names:
-                                if band_name not in self.remove_channels:
-                                    if band_name == 'LST':
-                                        lst_band_idx = current_idx
-                                        break
-                                    current_idx += 1
-
-                            if lst_band_idx is not None:
-                                normalized_scene = normalized_scene[
-                                    :, :, lst_band_idx:lst_band_idx + 1]  # Keep LST band only
-                            else:
-                                raise ValueError(f"Error in scene interpolation...")
-
+                        normalized_scene = self._normalize_scene(scene, is_input=is_input)
                         existing_data[month] = normalized_scene
                 except Exception as e:
                     # Skip months that fail to load (file corruption, etc.)
