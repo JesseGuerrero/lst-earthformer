@@ -700,13 +700,12 @@ class LandsatSequenceDataset(Dataset):
         scene_dir = Path(monthly_scenes[month])
 
         bands = []
-        for band_name in self.band_names:  # Skip DEM since we loaded it separately
-            if band_name == 'DEM' and 'DEM' not in self.remove_channels:
+        for band_name in self.band_names:
+            if band_name == 'DEM':
                 dem = self._load_dem_tile(city, tile_row, tile_col)
                 bands.append(dem)
-            if band_name == 'DEM':
-                continue
-            if is_input and self.remove_lst and band_name == "LST":
+            elif is_input and self.remove_lst and band_name == "LST":
+                # Skip LST band for input sequences when remove_lst is True
                 continue
             else:
                 tile_path = scene_dir / f"{band_name}_row_{tile_row:03d}_col_{tile_col:03d}.tif"
@@ -797,7 +796,8 @@ class LandsatSequenceDataset(Dataset):
         for month in months:
             if month in monthly_scenes_for_city:
                 try:
-                    scene = self._load_scene_tile(not is_output, city, month, tile_row, tile_col) # if its not output then its input
+                    is_input = not is_output
+                    scene = self._load_scene_tile(is_input, city, month, tile_row, tile_col) # if its not output then its input
                     if scene is not None:
                         normalized_scene = self._normalize_scene(scene)
                         if is_output:
