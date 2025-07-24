@@ -701,9 +701,11 @@ class LandsatSequenceDataset(Dataset):
 
         bands = []
         for band_name in self.band_names:  # Skip DEM since we loaded it separately
-            if band_name == 'dem' and 'dem' not in self.remove_channels:
+            if band_name == 'DEM' and 'DEM' not in self.remove_channels:
                 dem = self._load_dem_tile(city, tile_row, tile_col)
                 bands.append(dem)
+            if band_name == 'DEM':
+                continue
             if is_input and self.remove_lst and band_name == "LST":
                 continue
             else:
