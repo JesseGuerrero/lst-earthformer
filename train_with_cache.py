@@ -170,6 +170,13 @@ def train_landsat_model(
             print(f"⚠️ Failed to send start alert: {e}")
     
     # Initialize model
+    total_channels = 9  # Original: DEM, LST, red, green, blue, ndvi, ndwi, ndbi, albedo
+    input_channels = total_channels - len(remove_channels)
+
+    print(f"📊 Channel configuration:")
+    print(f"   Original channels: {total_channels}")
+    print(f"   Removed channels: {remove_channels} ({len(remove_channels)} channels)")
+    print(f"   Final input channels: {input_channels}")
     model = LandsatLSTPredictor(
         learning_rate=learning_rate,
         weight_decay=1e-5,
@@ -177,7 +184,7 @@ def train_landsat_model(
         max_epochs=max_epochs,        
         input_sequence_length=input_sequence_length,
         output_sequence_length=output_sequence_length,
-        input_channels=9-(len(remove_channels)-1),
+        input_channels=input_channels,
         model_size=model_size
     )
     

@@ -444,29 +444,32 @@ class LandsatLSTPredictor(pl.LightningModule):
                         axes = axes.reshape(3, 1)
                     
                     fig.patch.set_facecolor('lightgray')
-                    
-                    # Row 0: Input sequences (LST band - index 1)
+
+                    # Row 0: Input sequences (find LST band index dynamically)
                     for t in range(input_len):
                         ax = axes[0, t]
                         ax.set_facecolor('lightgray')
-                        
-                        lst_input = input_seq[t, :, :, 1]  # LST band
+
+                        # Find LST band index in remaining channels
+                        lst_band_idx = self._get_lst_band_index()
+
+                        lst_input = input_seq[t, :, :, lst_band_idx]  # Use dynamic index
                         lst_input_fahrenheit = lst_input * (211.0 - (-189.0)) + (-189.0)
-                        
+
                         # Create mask for NODATA
                         nodata_mask = np.abs(lst_input_fahrenheit - (-189.0)) < 0.1
                         lst_masked = np.ma.masked_where(nodata_mask, lst_input_fahrenheit)
-                        
+
                         if not lst_masked.mask.all():
                             vmin_input = lst_masked.min()
                             vmax_input = lst_masked.max()
                             im = ax.imshow(lst_masked, cmap='RdYlBu_r', vmin=vmin_input, vmax=vmax_input, alpha=0.9)
-                            ax.set_title(f'Input T={t+1}\n({vmin_input:.1f}°F - {vmax_input:.1f}°F)', fontsize=10)
+                            ax.set_title(f'Input T={t + 1}\n({vmin_input:.1f}°F - {vmax_input:.1f}°F)', fontsize=10)
                             plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
                         else:
                             ax.imshow(np.zeros_like(lst_input_fahrenheit), cmap='RdYlBu_r', alpha=0)
-                            ax.set_title(f'Input T={t+1}\n(No Valid Data)', fontsize=10)
-                        
+                            ax.set_title(f'Input T={t + 1}\n(No Valid Data)', fontsize=10)
+
                         ax.axis('off')
                     
                     # Fill remaining input columns
@@ -612,6 +615,21 @@ class LandsatLSTPredictor(pl.LightningModule):
             print(f"Warning: Could not get sample metadata: {e}")
             return {}
 
+    def _get_lst_band_index(self) -> int:
+        """Get the index of the LST band in the current channel configuration"""
+        removed_channels = []
+        if hasattr(self.trainer, 'datamodule') and hasattr(self.trainer.datamodule, 'remove_channels'):
+            removed_channels = self.trainer.datamodule.remove_channels
+
+        original_bands = ['DEM', 'LST', 'red', 'green', 'blue', 'ndvi', 'ndwi', 'ndbi', 'albedo']
+        for channel_to_remove in removed_channels:
+            if channel_to_remove == "LST":
+                continue
+            elif channel_to_remove in original_bands:
+                original_bands.remove(channel_to_remove)
+
+        return original_bands.index('LST')
+
     def test_step(self, batch: Tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> torch.Tensor:
         """Test step with proper masked loss usage and image logging similar to validation"""
         inputs, targets = batch
@@ -684,31 +702,34 @@ class LandsatLSTPredictor(pl.LightningModule):
                     axes = axes.reshape(3, 1)
                 
                 fig.patch.set_facecolor('lightgray')
-                
-                # Row 0: Input sequences (LST band - index 1)
+
+                # Row 0: Input sequences (find LST band index dynamically)
                 for t in range(input_len):
                     ax = axes[0, t]
                     ax.set_facecolor('lightgray')
-                    
-                    lst_input = input_seq[t, :, :, 1]  # LST band
+
+                    # Find LST band index in remaining channels
+                    lst_band_idx = self._get_lst_band_index()
+
+                    lst_input = input_seq[t, :, :, lst_band_idx]  # Use dynamic index
                     lst_input_fahrenheit = lst_input * (211.0 - (-189.0)) + (-189.0)
-                    
+
                     # Create mask for NODATA
                     nodata_mask = np.abs(lst_input_fahrenheit - (-189.0)) < 0.1
                     lst_masked = np.ma.masked_where(nodata_mask, lst_input_fahrenheit)
-                    
+
                     if not lst_masked.mask.all():
                         vmin_input = lst_masked.min()
                         vmax_input = lst_masked.max()
                         im = ax.imshow(lst_masked, cmap='RdYlBu_r', vmin=vmin_input, vmax=vmax_input, alpha=0.9)
-                        ax.set_title(f'Input T={t+1}\n({vmin_input:.1f}°F - {vmax_input:.1f}°F)', fontsize=10)
+                        ax.set_title(f'Input T={t + 1}\n({vmin_input:.1f}°F - {vmax_input:.1f}°F)', fontsize=10)
                         plt.colorbar(im, ax=ax, fraction=0.046, label='°F')
                     else:
                         ax.imshow(np.zeros_like(lst_input_fahrenheit), cmap='RdYlBu_r', alpha=0)
-                        ax.set_title(f'Input T={t+1}\n(No Valid Data)', fontsize=10)
-                    
+                        ax.set_title(f'Input T={t + 1}\n(No Valid Data)', fontsize=10)
+
                     ax.axis('off')
-                
+
                 # Fill remaining input columns
                 for t in range(input_len, max_timesteps):
                     axes[0, t].set_facecolor('lightgray')

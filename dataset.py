@@ -73,9 +73,12 @@ class LandsatSequenceDataset(Dataset):
             self._setup_year_based_splits(train_years, val_years, test_years)
         
         self.cities = self._get_all_cities()
+        self.remove_lst=False
         self.band_names = ['DEM', 'LST', 'red', 'green', 'blue', 'ndvi', 'ndwi', 'ndbi', 'albedo']
         for channel_to_remove in self.remove_channels:
-            if channel_to_remove in self.band_names:
+            if channel_to_remove == "LST":
+                self.remove_lst = True
+            elif channel_to_remove in self.band_names:
                 self.band_names.remove(channel_to_remove)
         
         # Build tile sequences
@@ -337,6 +340,8 @@ class LandsatSequenceDataset(Dataset):
                 
                 # Check each band for this timestep
                 for band_name in self.band_names:
+                    if self.remove_lst and band_name == "LST":
+                        continue
                     tile_path = scene_dir / f"{band_name}_row_{tile_row:03d}_col_{tile_col:03d}.tif"
                     
                     if not tile_path.exists():
@@ -689,21 +694,22 @@ class LandsatSequenceDataset(Dataset):
         self._dem_cache[cache_key] = dem_data
         return dem_data
     
-    def _load_scene_tile(self, city: str, month: str, tile_row: int, tile_col: int) -> np.ndarray:
+    def _load_scene_tile(self, is_input: bool, city: str, month: str, tile_row: int, tile_col: int) -> np.ndarray:
         """Load all bands for a scene tile"""
         monthly_scenes = self._get_monthly_scenes(city)
         scene_dir = Path(monthly_scenes[month])
 
         bands = []
-        # Load DEM (constant for city/tile position)
-        if 'dem' not in self.remove_channels:
-            dem = self._load_dem_tile(city, tile_row, tile_col)
-            bands = [dem]  # Start with DEM
-
-        for band_name in self.band_names[1:]:  # Skip DEM since we loaded it separately
-            tile_path = scene_dir / f"{band_name}_row_{tile_row:03d}_col_{tile_col:03d}.tif"
-            band_data = self._load_raster(str(tile_path))
-            bands.append(band_data)
+        for band_name in self.band_names:  # Skip DEM since we loaded it separately
+            if band_name == 'dem' and 'dem' not in self.remove_channels:
+                dem = self._load_dem_tile(city, tile_row, tile_col)
+                bands.append(dem)
+            if is_input and self.remove_lst and band_name == "LST":
+                continue
+            else:
+                tile_path = scene_dir / f"{band_name}_row_{tile_row:03d}_col_{tile_col:03d}.tif"
+                band_data = self._load_raster(str(tile_path))
+                bands.append(band_data)
         
         # Stack to (H, W, C)
         scene_data = np.stack(bands, axis=-1)
@@ -777,43 +783,58 @@ class LandsatSequenceDataset(Dataset):
         
         return [result_stack[i] for i in range(len(months))]
 
-    def _load_sequence_with_interpolation(self, city: str, tile_row: int, tile_col: int, 
-                                    months: List[str], monthly_scenes: Dict[str, str], 
-                                    lst_only: bool = False) -> List[np.ndarray]:
+    def _load_sequence_with_interpolation(self, city: str, tile_row: int, tile_col: int,
+                                          months: List[str], monthly_scenes: Dict[str, str],
+                                          is_output: bool = False) -> List[np.ndarray]:
         """Load a sequence of scenes with interpolation for missing months"""
         scenes = []
         monthly_scenes_for_city = monthly_scenes
-        
+
         # First, load all existing scenes
         existing_data = {}
         for month in months:
             if month in monthly_scenes_for_city:
                 try:
-                    scene = self._load_scene_tile(city, month, tile_row, tile_col)
+                    scene = self._load_scene_tile(not is_output, city, month, tile_row, tile_col) # if its not output then its input
                     if scene is not None:
                         normalized_scene = self._normalize_scene(scene)
-                        if lst_only:
-                            normalized_scene = normalized_scene[:, :, 1:2]  # LST band only
+                        if is_output:
+                            # Find LST band index in the remaining channels
+                            lst_band_idx = None
+                            current_idx = 0
+                            for band_name in self.band_names:
+                                if band_name not in self.remove_channels:
+                                    if band_name == 'LST':
+                                        lst_band_idx = current_idx
+                                        break
+                                    current_idx += 1
+
+                            if lst_band_idx is not None:
+                                normalized_scene = normalized_scene[
+                                    :, :, lst_band_idx:lst_band_idx + 1]  # Keep LST band only
+                            else:
+                                raise ValueError(f"Error in scene interpolation...")
+
                         existing_data[month] = normalized_scene
                 except Exception as e:
                     # Skip months that fail to load (file corruption, etc.)
                     print(f"Warning: Failed to load {city} {month} tile({tile_row},{tile_col}): {e}")
                     continue
-        
+
         # If we have all the data, return it directly
         if len(existing_data) == len(months):
             return [existing_data[month] for month in months]
-        
+
         # If training split and missing some months, interpolate
-        if len(existing_data) >= 2: 
+        if len(existing_data) >= 2:
             return self._interpolate_missing_scenes(months, existing_data)
-        
+
         # This should never happen due to filtering - raise error to debug
         raise ValueError(
             f"Insufficient data for sequence interpolation: "
             f"city={city}, tile=({tile_row},{tile_col}), "
             f"months={months}, existing_months={list(existing_data.keys())}, "
-            f"split={self.split}, lst_only={lst_only}. "
+            f"split={self.split}, is_output_sequence={is_output}. "
             f"Expected at least 2 existing months but found {len(existing_data)}."
         )
 
@@ -850,7 +871,7 @@ class LandsatSequenceDataset(Dataset):
         
         #Create a load sequence with no interpolation if requiring more than 1 sequence
         output_scenes = self._load_sequence_with_interpolation(
-            city, tile_row, tile_col, output_months, monthly_scenes, lst_only=True
+            city, tile_row, tile_col, output_months, monthly_scenes, is_output=True
         )
         
         # Convert to tensors
