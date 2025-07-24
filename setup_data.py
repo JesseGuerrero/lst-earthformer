@@ -51,7 +51,8 @@ def get_cache_filename(
     test_years: Optional[List[int]] = None,
     debug_monthly_split: bool = False,
     debug_year: int = 2014,
-    max_input_nodata_pct: float = 0.60
+    max_input_nodata_pct: float = 0.60,
+    remove_channels: list = []
 ) -> str:
     """Generate a unique cache filename based on dataset parameters"""
     
@@ -61,13 +62,20 @@ def get_cache_filename(
     config_str = f"{split}_{cluster}_{input_seq_len}_{output_seq_len}"
     config_str += f"_{train_years}_{val_years}_{test_years}"
     config_str += f"_{debug_monthly_split}_{debug_year}_{max_input_nodata_pct}"
+
     
     config_hash = hashlib.md5(config_str.encode()).hexdigest()[:8]
     
     cache_dir = Path(dataset_root) / "sequence_cache"
     cache_dir.mkdir(exist_ok=True)
-    
-    return str(cache_dir / f"sequences_{split}_{cluster}_{config_hash}.pkl")
+
+    if len(remove_channels) == 0:
+        return str(cache_dir / f"sequences_{split}_{cluster}_{config_hash}.pkl")
+    else:
+        string_channel = ""
+        for removed_channel in remove_channels:
+            string_channel += f"_r{removed_channel}"
+        return str(cache_dir / f"sequences_{split}_{cluster}_{config_hash}{string_channel}.pkl")
 
 def build_split_cache(
     dataset_root: str,
@@ -81,7 +89,8 @@ def build_split_cache(
     debug_monthly_split: bool = False,
     debug_year: int = 2014,
     max_input_nodata_pct: float = 0.60,
-    force_rebuild: bool = False
+    force_rebuild: bool = False,
+    remove_channels: list = [],
 ) -> str:
     """
     Build and cache tile sequences for a single split.
@@ -102,7 +111,8 @@ def build_split_cache(
         test_years=test_years,
         debug_monthly_split=debug_monthly_split,
         debug_year=debug_year,
-        max_input_nodata_pct=max_input_nodata_pct
+        max_input_nodata_pct=max_input_nodata_pct,
+        remove_channels=remove_channels
     )
     
     # Check if cache already exists
@@ -137,7 +147,8 @@ def build_split_cache(
             test_years=test_years,
             debug_monthly_split=debug_monthly_split,
             debug_year=debug_year,
-            max_input_nodata_pct=max_input_nodata_pct
+            max_input_nodata_pct=max_input_nodata_pct,
+            remove_channels=remove_channels
         )
         
         sequences = dataset.tile_sequences
@@ -171,7 +182,8 @@ def build_all_caches(
     debug_monthly_split: bool = False,
     debug_year: int = 2014,
     max_input_nodata_pct: float = 0.60,
-    force_rebuild: bool = False
+    force_rebuild: bool = False,
+    remove_channels: list = [],
 ) -> dict:
     """
     Build and cache tile sequences for all specified splits.
@@ -229,7 +241,8 @@ def build_all_caches(
                 debug_monthly_split=debug_monthly_split,
                 debug_year=debug_year,
                 max_input_nodata_pct=max_input_nodata_pct,
-                force_rebuild=force_rebuild
+                force_rebuild=force_rebuild,
+                remove_channels=remove_channels
             )
             cache_files[split] = cache_file
             
@@ -300,6 +313,9 @@ def main():
     parser.add_argument("--test_years", type=int, nargs="*",
                         default=[2024,2025], 
                         help="Years for test split")
+    parser.add_argument("--remove_channels", type=str, nargs="*",
+                        default=[], # 'LST' 'NDVI' 'BLUE' etc.
+                        help="Removes channels from dataset")
     
     # Quality filtering
     parser.add_argument("--max_nodata", type=float, default=0.60,
@@ -332,7 +348,8 @@ def main():
                 test_years=args.test_years if not args.debug else None,
                 debug_monthly_split=args.debug,
                 debug_year=args.debug_year,
-                max_input_nodata_pct=args.max_nodata
+                max_input_nodata_pct=args.max_nodata,
+                remove_channels=args.remove_channels
             )
             
             if os.path.exists(cache_file):
@@ -360,7 +377,8 @@ def main():
             debug_monthly_split=args.debug,
             debug_year=args.debug_year,
             max_input_nodata_pct=args.max_nodata,
-            force_rebuild=args.force
+            force_rebuild=args.force,
+            remove_channels=args.remove_channels
         )
         
         # Print next steps

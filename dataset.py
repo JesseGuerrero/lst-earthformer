@@ -48,10 +48,12 @@ class LandsatSequenceDataset(Dataset):
         debug_year: int = 2014,       
         limit_batches: Optional[float] = None,
         max_input_nodata_pct: float = 0.60,
+        remove_channels: list = []
     ):
         """
         Dataset for Landsat sequence prediction using tiled data with year-based splits
         """
+        self.remove_channels = remove_channels
         self.dataset_root = Path(dataset_root)
         self.cluster = cluster
         self.input_sequence_length = input_sequence_length
@@ -72,6 +74,9 @@ class LandsatSequenceDataset(Dataset):
         
         self.cities = self._get_all_cities()
         self.band_names = ['DEM', 'LST', 'red', 'green', 'blue', 'ndvi', 'ndwi', 'ndbi', 'albedo']
+        for channel_to_remove in self.remove_channels:
+            if channel_to_remove in self.band_names:
+                self.band_names.remove(channel_to_remove)
         
         # Build tile sequences
         self.tile_sequences = self._build_tile_sequences()
@@ -118,7 +123,13 @@ class LandsatSequenceDataset(Dataset):
         config_hash = hashlib.md5(config_str.encode()).hexdigest()[:8]
         
         cache_dir = self.dataset_root / "sequence_cache"
-        cache_filename = str(cache_dir / f"sequences_{self.split}_{self.cluster}_{config_hash}.pkl")
+        if len(self.remove_channels) == 0:
+            cache_filename = str(cache_dir / f"sequences_{self.split}_{self.cluster}_{config_hash}.pkl")
+        else:
+            string_channel = ""
+            for removed_channel in self.remove_channels:
+                string_channel += f"_r{removed_channel}"
+            cache_filename = str(cache_dir / f"sequences_{self.split}_{self.cluster}_{config_hash}{string_channel}.pkl")
         
         print(f"🔍 Looking for cache file: {cache_filename}")
         
@@ -321,13 +332,11 @@ class LandsatSequenceDataset(Dataset):
             total_pixels = 0
             total_nodata_pixels = 0
             
-            band_names = ['LST', 'red', 'green', 'blue', 'ndvi', 'ndwi', 'ndbi', 'albedo']  # Skip DEM as it's constant
-            
             for month in input_months:
                 scene_dir = Path(monthly_scenes[month])
                 
                 # Check each band for this timestep
-                for band_name in band_names:
+                for band_name in self.band_names:
                     tile_path = scene_dir / f"{band_name}_row_{tile_row:03d}_col_{tile_col:03d}.tif"
                     
                     if not tile_path.exists():
@@ -684,13 +693,13 @@ class LandsatSequenceDataset(Dataset):
         """Load all bands for a scene tile"""
         monthly_scenes = self._get_monthly_scenes(city)
         scene_dir = Path(monthly_scenes[month])
-        
+
+        bands = []
         # Load DEM (constant for city/tile position)
-        dem = self._load_dem_tile(city, tile_row, tile_col)
-        
-        # Load other bands
-        bands = [dem]  # Start with DEM
-        
+        if 'dem' not in self.remove_channels:
+            dem = self._load_dem_tile(city, tile_row, tile_col)
+            bands = [dem]  # Start with DEM
+
         for band_name in self.band_names[1:]:  # Skip DEM since we loaded it separately
             tile_path = scene_dir / f"{band_name}_row_{tile_row:03d}_col_{tile_col:03d}.tif"
             band_data = self._load_raster(str(tile_path))
@@ -871,7 +880,8 @@ class LandsatDataModule(pl.LightningDataModule):
         max_input_nodata_pct: float = 0.60,
         cluster: str = "all",
         limit_train_batches: Optional[float] = None,  
-        limit_val_batches: Optional[float] = None     
+        limit_val_batches: Optional[float] = None,
+        remove_channels: list = []
     ):
         super().__init__()
         self.dataset_root = dataset_root
@@ -891,6 +901,7 @@ class LandsatDataModule(pl.LightningDataModule):
         self.limit_val_batches = limit_val_batches
         self.max_input_nodata_pct = max_input_nodata_pct
         self.cluster = cluster
+        self.remove_channels = remove_channels
 
     def setup(self, stage: Optional[str] = None):
         """Setup datasets for each stage"""
@@ -916,7 +927,8 @@ class LandsatDataModule(pl.LightningDataModule):
                 debug_monthly_split=self.debug_monthly_split,
                 debug_year=self.debug_year,
                 limit_batches=self.limit_train_batches,
-                max_input_nodata_pct=self.max_input_nodata_pct
+                max_input_nodata_pct=self.max_input_nodata_pct,
+                remove_channels=self.remove_channels
             )
             
             print("📊 Loading validation dataset...")
@@ -932,7 +944,8 @@ class LandsatDataModule(pl.LightningDataModule):
                 debug_monthly_split=self.debug_monthly_split,
                 debug_year=self.debug_year,
                 limit_batches=self.limit_val_batches,
-                max_input_nodata_pct=self.max_input_nodata_pct
+                max_input_nodata_pct=self.max_input_nodata_pct,
+                remove_channels=self.remove_channels
             )
         
         # Setup test dataset
@@ -950,7 +963,8 @@ class LandsatDataModule(pl.LightningDataModule):
                 debug_monthly_split=self.debug_monthly_split,
                 debug_year=self.debug_year,
                 max_input_nodata_pct=self.max_input_nodata_pct,             
-                limit_batches=getattr(self, 'limit_test_batches', None)
+                limit_batches=getattr(self, 'limit_test_batches', None),
+                remove_channels=self.remove_channels
             )
         
         print("✅ Dataset setup complete!")

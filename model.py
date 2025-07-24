@@ -20,6 +20,7 @@ class LandsatLSTPredictor(pl.LightningModule):
         input_sequence_length: int = 3,
         output_sequence_length: int = 3,
         model_size: str = "small",  # NEW: "tiny", "small", "medium", "large", "earthnet"
+        input_channels: int = 9,
         **model_kwargs
     ):
         super().__init__()
@@ -98,7 +99,7 @@ class LandsatLSTPredictor(pl.LightningModule):
         
         # Default Landsat-optimized config (shared across all sizes)
         self.model_config = {
-            'input_shape': (input_sequence_length, 128, 128, 9),
+            'input_shape': (input_sequence_length, 128, 128, input_channels),
             'target_shape': (output_sequence_length, 128, 128, 1),
             'attn_drop': 0.1,
             'proj_drop': 0.1,

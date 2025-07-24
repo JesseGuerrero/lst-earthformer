@@ -42,6 +42,7 @@ def train_landsat_model(
     debug_monthly_split: bool = False,
     debug_year: int = 2014,
     max_input_nodata_pct: float = 0.95,
+    remove_channels: list = [],
     
     # Training parameters
     wandb_project: str = "AAAI-Project-final-tests",
@@ -77,6 +78,7 @@ def train_landsat_model(
         "debug_year": debug_year,
         "max_input_nodata_pct": max_input_nodata_pct,
         "augmented": 1,
+        "remove_channels": remove_channels,
         
         # Training parameters
         "learning_rate": learning_rate,
@@ -139,7 +141,8 @@ def train_landsat_model(
         debug_year=debug_year,
         max_input_nodata_pct=max_input_nodata_pct,
         limit_train_batches=limit_train_batches,
-        limit_val_batches=limit_val_batches
+        limit_val_batches=limit_val_batches,
+        remove_channels=remove_channels
     )
     
     # Initialize Weights & Biases logger
@@ -174,6 +177,7 @@ def train_landsat_model(
         max_epochs=max_epochs,        
         input_sequence_length=input_sequence_length,
         output_sequence_length=output_sequence_length,
+        input_channels=9-(len(remove_channels)-1),
         model_size=model_size
     )
     
@@ -305,6 +309,9 @@ def main():
     parser.add_argument("--train_years", type=int, nargs="*",
                         default=[2013,2014,2015],
                         help="Years for training split")
+    parser.add_argument("--remove_channels", type=str, nargs="*",
+                        default=[], # 'NDVI' 'red' 'blue' etc.
+                        help="Years for training split")
     parser.add_argument("--val_years", type=int, nargs="*", 
                         default=[2016],
                         help="Years for validation split")
@@ -393,6 +400,7 @@ def main():
             limit_train_batches=args.limit_train_batches,
             limit_val_batches=args.limit_val_batches,
             limit_test_batches=args.limit_test_batches,
+            remove_channels=args.remove_channels
         )
         
         print("\n🎉 All done! Check your WandB dashboard for results.")
