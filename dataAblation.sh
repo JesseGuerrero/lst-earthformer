@@ -1,6 +1,5 @@
 #!/bin/bash
 
-
 echo "🚀 Building caches for all parameter combinations..."
 echo "This will pre-build caches for fast training startup."
 echo ""
@@ -11,42 +10,44 @@ OUTPUT_LENGTH=1
 TRAIN_YEARS="2013 2014 2015 2016 2017 2018 2019 2020 2021"
 VAL_YEARS="2022 2023"
 TEST_YEARS="2024 2025"
-REMOVED_CHANNELS=("'DEM' 'red' 'green' 'blue' 'ndvi' 'ndwi' 'ndbi' 'albedo'", "LST")
+
+# Parameter variations
 CLUSTERS=("1" "all" "2" "3" "4")
 INPUT_LENGTHS=(12)
 MAX_NODATA_VALUES=(0.5)
 
+# Channel ablation configurations
+REMOVED_CHANNELS_CONFIGS=(
+    "DEM red green blue ndvi ndwi ndbi albedo"
+    "LST"
+)
+
 # Calculate total combinations
-TOTAL_COMBINATIONS=$((${#CLUSTERS[@]} * ${#INPUT_LENGTHS[@]} * ${#MAX_NODATA_VALUES[@]} * ${#LEARNING_RATES[@]} * ${#PRECISIONS[@]} * ${#REMOVED_CHANNELS[@]}))
-log_and_echo "📊 Total data runs to execute: $TOTAL_COMBINATIONS"
-log_and_echo ""
+TOTAL_COMBINATIONS=$((${#CLUSTERS[@]} * ${#INPUT_LENGTHS[@]} * ${#MAX_NODATA_VALUES[@]} * ${#REMOVED_CHANNELS_CONFIGS[@]}))
+echo "📊 Total data runs to execute: $TOTAL_COMBINATIONS"
+echo ""
 
 # Counter for progress tracking
 CURRENT=0
-SUCCESSFUL_RUNS=0
-FAILED_RUNS=0
 
 # Loop through all combinations
 for cluster in "${CLUSTERS[@]}"; do
     for input_length in "${INPUT_LENGTHS[@]}"; do
         for max_nodata in "${MAX_NODATA_VALUES[@]}"; do
-            for removed_channels in "${REMOVED_CHANNELS[@]}"; do
+            for removed_channels in "${REMOVED_CHANNELS_CONFIGS[@]}"; do
                 CURRENT=$((CURRENT + 1))
 
-                echo "="
-                echo "🎯 Starting training run $CURRENT/$TOTAL_COMBINATIONS"
+                echo "================================================="
+                echo "🎯 Starting data setup run $CURRENT/$TOTAL_COMBINATIONS"
                 echo "   Cluster: $cluster"
                 echo "   Input Length: $input_length"
                 echo "   Max NoData: $max_nodata"
-                echo "   Learning Rate: $learning_rate"
-                echo "   Precision: $precision"
-                echo "   Model: $MODEL_SIZE"
-                echo "   Removed ChannelsL $removed_channels"
-                echo "="
+                echo "   Removed Channels: $removed_channels"
+                echo "================================================="
 
-                # Run training with current parameter combination
+                # Run data setup with current parameter combination
                 python setup_data.py \
-                    --removed_channels $removed_channels
+                    --remove_channels $removed_channels \
                     --dataset_root "$DATASET_ROOT" \
                     --cluster "$cluster" \
                     --input_length $input_length \
@@ -54,32 +55,29 @@ for cluster in "${CLUSTERS[@]}"; do
                     --train_years $TRAIN_YEARS \
                     --val_years $VAL_YEARS \
                     --test_years $TEST_YEARS \
-                    --max_nodata $max_nodata \
+                    --max_nodata $max_nodata
 
-                    # Check if the command succeeded
+                # Check if the command succeeded
                 if [ $? -eq 0 ]; then
-                    echo "✅ Success: cluster=$cluster, input_length=$input_length, max_nodata=$max_nodata" >> /dev/stderr
+                    echo "✅ Success: cluster=$cluster, input_length=$input_length, max_nodata=$max_nodata, removed_channels=[$removed_channels]" >&2
                 else
-                    echo "❌ Failed: cluster=$cluster, input_length=$input_length, max_nodata=$max_nodata" >> /dev/stderr
-                    echo "Continuing with next combination..." >> /dev/stderr
+                    echo "❌ Failed: cluster=$cluster, input_length=$input_length, max_nodata=$max_nodata, removed_channels=[$removed_channels]" >&2
+                    echo "Continuing with next combination..." >&2
                 fi
 
-                echo "" >> /dev/stderr
+                echo "" >&2
             done
         done
     done
 done
 
-echo "🎉 Cache building complete!" >> /dev/stderr
-echo "" >> /dev/stderr
-echo "📈 Summary of cached configurations:" >> /dev/stderr
-echo "   Clusters: ${CLUSTERS[*]}" >> /dev/stderr
-echo "   Input Lengths: ${INPUT_LENGTHS[*]}" >> /dev/stderr
-echo "   Max NoData Values: ${MAX_NODATA_VALUES[*]}" >> /dev/stderr
-echo "   Total: $TOTAL_COMBINATIONS combinations" >> /dev/stderr
-echo "" >> /dev/stderr
-echo "🚀 You can now run training with any of these parameter combinations for instant startup!" >> /dev/stderr
-echo "" >> /dev/stderr
-echo "Example training commands:" >> /dev/stderr
-echo "   python train_with_cache.py --cluster 1 --input_length 12 --max_nodata 0.5" >> /dev/stderr
-echo "   python train_with_cache.py --cluster 3 --input_length 6 --max_nodata 0.75" >> /dev/stderr
+echo "🎉 Cache building complete!" >&2
+echo "" >&2
+echo "📈 Summary of cached configurations:" >&2
+echo "   Clusters: ${CLUSTERS[*]}" >&2
+echo "   Input Lengths: ${INPUT_LENGTHS[*]}" >&2
+echo "   Max NoData Values: ${MAX_NODATA_VALUES[*]}" >&2
+echo "   Channel Configurations: ${#REMOVED_CHANNELS_CONFIGS[@]} configs" >&2
+echo "   Total: $TOTAL_COMBINATIONS combinations" >&2
+echo "" >&2
+echo "🚀 You can now run training with any of these parameter combinations for instant startup!" >&2
