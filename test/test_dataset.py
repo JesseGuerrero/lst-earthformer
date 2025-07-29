@@ -118,7 +118,10 @@ class LandsatSequenceDataset(Dataset):
         config_hash = hashlib.md5(config_str.encode()).hexdigest()[:8]
         
         cache_dir = self.dataset_root / "test_sequence_cache"
-        cache_filename = str(cache_dir / f"test_sequences_{config_hash}.pkl")
+        if val_years == None:
+            cache_filename = str(cache_dir / f"test_sequences_{config_hash}.pkl")
+        else:
+            cache_filename = str(cache_dir / f"test_sequences_{self.split}_{config_hash}_val{val_years}.pkl")
         
         print(f"🔍 Looking for cache file: {cache_filename}")
         
@@ -878,60 +881,37 @@ class LandsatDataModule(pl.LightningDataModule):
             self.limit_train_batches = 1.0
         if self.limit_val_batches == 1:
             self.limit_val_batches = 1.0
-        
-        print(f"🔧 Setting up datasets for stage: {stage}")
-        
-        # Setup train and val datasets for training
-        if stage == "fit" or stage is None:
-            print("📚 Loading training dataset...")
-            self.train_dataset = LandsatSequenceDataset(
-                self.dataset_root,
-                cluster=self.cluster,
-                input_sequence_length=self.input_sequence_length,
-                output_sequence_length=self.output_sequence_length,
-                split='train',
-                train_years=self.train_years,
-                val_years=self.val_years,
-                test_years=self.test_years,
-                debug_monthly_split=self.debug_monthly_split,
-                debug_year=self.debug_year,
-                limit_batches=self.limit_train_batches,
-                max_input_nodata_pct=self.max_input_nodata_pct
-            )
-            
-            print("📊 Loading validation dataset...")
-            self.val_dataset = LandsatSequenceDataset(
-                self.dataset_root,
-                cluster=self.cluster,
-                input_sequence_length=self.input_sequence_length,
-                output_sequence_length=self.output_sequence_length,
-                split='val',
-                train_years=self.train_years,
-                val_years=self.val_years,
-                test_years=self.test_years,
-                debug_monthly_split=self.debug_monthly_split,
-                debug_year=self.debug_year,
-                limit_batches=self.limit_val_batches,
-                max_input_nodata_pct=self.max_input_nodata_pct
-            )
-        
-        # Setup test dataset
-        if stage == "test" or stage is None:
-            print("🧪 Loading test dataset...")
-            self.test_dataset = LandsatSequenceDataset(
-                self.dataset_root,
-                cluster=self.cluster,
-                input_sequence_length=self.input_sequence_length,
-                output_sequence_length=self.output_sequence_length,
-                split='test',
-                train_years=self.train_years,
-                val_years=self.val_years,
-                test_years=self.test_years,
-                debug_monthly_split=self.debug_monthly_split,
-                debug_year=self.debug_year,
-                max_input_nodata_pct=self.max_input_nodata_pct,             
-                limit_batches=getattr(self, 'limit_test_batches', None)
-            )
+        print("📊 Loading validation dataset...")
+        self.val_dataset = LandsatSequenceDataset(
+            self.dataset_root,
+            cluster=self.cluster,
+            input_sequence_length=self.input_sequence_length,
+            output_sequence_length=self.output_sequence_length,
+            split='val',
+            train_years=self.train_years,
+            val_years=self.val_years,
+            test_years=self.test_years,
+            debug_monthly_split=self.debug_monthly_split,
+            debug_year=self.debug_year,
+            limit_batches=self.limit_val_batches,
+            max_input_nodata_pct=self.max_input_nodata_pct
+        )
+
+        print("🧪 Loading test dataset...")
+        self.test_dataset = LandsatSequenceDataset(
+            self.dataset_root,
+            cluster=self.cluster,
+            input_sequence_length=self.input_sequence_length,
+            output_sequence_length=self.output_sequence_length,
+            split='test',
+            train_years=self.train_years,
+            val_years=self.val_years,
+            test_years=self.test_years,
+            debug_monthly_split=self.debug_monthly_split,
+            debug_year=self.debug_year,
+            max_input_nodata_pct=self.max_input_nodata_pct,
+            limit_batches=getattr(self, 'limit_test_batches', None)
+        )
         
         print("✅ Dataset setup complete!")
     def train_dataloader(self):

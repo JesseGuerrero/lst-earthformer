@@ -295,15 +295,15 @@ class LandsatSequenceDataset(Dataset):
                 continue
             
             # Check NODATA in existing output months
-            has_nodata_output = False
-            for month in existing_output_months:
-                if self._has_nodata_in_lst_tile(city, month, tile_row, tile_col, monthly_scenes):
-                    has_nodata_output = True
-                    break
-            
-            if has_nodata_output:
-                current_start += relativedelta(months=1)
-                continue
+            # has_nodata_output = False
+            # for month in existing_output_months:
+            #     if self._has_nodata_in_lst_tile(city, month, tile_row, tile_col, monthly_scenes):
+            #         has_nodata_output = True
+            #         break
+            #
+            # if has_nodata_output:
+            #     current_start += relativedelta(months=1)
+            #     continue
             
             # Check excessive NODATA in existing input months
             if existing_input_months:

@@ -66,7 +66,11 @@ def get_cache_filename(
     
     cache_dir = Path(dataset_root) / "test_sequence_cache"
     cache_dir.mkdir(exist_ok=True)
-    return str(cache_dir / f"test_sequences_{config_hash}.pkl")
+    if val_years == None:
+        return str(cache_dir / f"test_sequences_{config_hash}.pkl")
+    else:
+        return str(cache_dir / f"test_sequences_{split}_{config_hash}_val{val_years}.pkl")
+
 
 def build_split_cache(
     dataset_root: str,

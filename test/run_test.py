@@ -21,7 +21,8 @@ from pathlib import Path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from test_model import PersonalizedLandsatLSTPredictor
-from test_dataset import LandsatDataModule
+from test_dataset import LandsatDataModule as PersonalizedDataModule
+from dataset import LandsatDataModule
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
 from pytorch_lightning.loggers import WandbLogger
@@ -29,6 +30,7 @@ from pytorch_lightning.strategies import DDPStrategy
 import wandb
 from typing import List, Optional
 import torch
+from model import LandsatLSTPredictor
 torch.set_float32_matmul_precision('medium')
 def train_landsat_model(
     # Dataset parameters (matching setup_data.py)
@@ -42,6 +44,8 @@ def train_landsat_model(
     debug_monthly_split: bool = False,
     debug_year: int = 2014,
     max_input_nodata_pct: float = 0.95,
+    checkpoint_path: str = "personalized",
+    remove_channels: list = [],
     
     # Training parameters
     wandb_project: str = "AAAI-Project-personalized-tests",
@@ -80,6 +84,8 @@ def train_landsat_model(
         "max_input_nodata_pct": max_input_nodata_pct,
         "augmented": 1,
         "use_all": use_all,
+        "checkpoint_path": checkpoint_path,
+        "remove_channels": remove_channels,
         
         # Training parameters
         "learning_rate": learning_rate,
@@ -128,23 +134,41 @@ def train_landsat_model(
     print()
     
     # Initialize data module with exact cache-matching parameters
-    data_module = LandsatDataModule(
-        dataset_root=dataset_root,
-        cluster=cluster,
-        batch_size=batch_size,
-        num_workers=num_workers,
-        input_sequence_length=input_sequence_length,
-        output_sequence_length=output_sequence_length,
-        train_years=train_years,
-        val_years=val_years,
-        test_years=test_years,
-        debug_monthly_split=debug_monthly_split,
-        debug_year=debug_year,
-        max_input_nodata_pct=max_input_nodata_pct,
-        limit_train_batches=limit_train_batches,
-        limit_val_batches=limit_val_batches
-    )
-    
+    if "Personalized" in checkpoint_path:
+        data_module = PersonalizedDataModule(
+            dataset_root=dataset_root,
+            cluster=cluster, #specifies data cluster to use as dataset
+            batch_size=batch_size,
+            num_workers=num_workers,
+            input_sequence_length=input_sequence_length,
+            output_sequence_length=output_sequence_length,
+            train_years=train_years,
+            val_years=val_years,
+            test_years=test_years,
+            debug_monthly_split=debug_monthly_split,
+            debug_year=debug_year,
+            max_input_nodata_pct=max_input_nodata_pct,
+            limit_train_batches=limit_train_batches,
+            limit_val_batches=limit_val_batches,
+        )
+    else: # used for removing channels and regular datasets
+        data_module = LandsatDataModule(
+            dataset_root=dataset_root,
+            cluster=cluster,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            input_sequence_length=input_sequence_length,
+            output_sequence_length=output_sequence_length,
+            train_years=train_years,
+            val_years=val_years,
+            test_years=test_years,
+            debug_monthly_split=debug_monthly_split,
+            debug_year=debug_year,
+            max_input_nodata_pct=max_input_nodata_pct,
+            limit_train_batches=limit_train_batches,
+            limit_val_batches=limit_val_batches,
+            remove_channels=remove_channels
+        )
     # Initialize Weights & Biases logger
     logger = WandbLogger(
         project=wandb_project,
@@ -223,17 +247,37 @@ def train_landsat_model(
     try:        
         print("\n🧪 Running final test...")
         try:
-            print("\n🧪 Running test with checkpoint...")
-            checkpoint_path = '/root/lst-earthformer/Personalized/Earthnet_No_Aux/all.ckpt'
-            print("📂 Loading model from checkpoints...")
-            model_from_checkpoint = PersonalizedLandsatLSTPredictor(
-                # Override any parameters that might be different
-                input_sequence_length=input_sequence_length,
-                output_sequence_length=output_sequence_length,
-                model_size=model_size,
-                use_all=use_all
-            )
-            test_results = trainer.test(model_from_checkpoint, data_module)
+            if "Personalized" in checkpoint_path: # Run personalized
+                print("📂 Loading personalized model from checkpoints...")
+                personalized_model = PersonalizedLandsatLSTPredictor(
+                    # Override any parameters that might be different
+                    input_sequence_length=input_sequence_length,
+                    output_sequence_length=output_sequence_length,
+                    model_size=model_size,
+                    use_all=use_all,
+                    checkpoint_dir=checkpoint_path
+                )
+                val_results = trainer.validate(personalized_model, data_module)
+                print(f"✅ Validation completed: {val_results}")
+                test_results = trainer.test(personalized_model, data_module)
+            else:
+                print("\n🧪 Running test with checkpoint...")
+                # Initialize model
+                total_channels = 9  # Original: DEM, LST, red, green, blue, ndvi, ndwi, ndbi, albedo
+                input_channels = total_channels - len(remove_channels)
+
+                print(f"📊 Channel configuration:")
+                print(f"   Original channels: {total_channels}")
+                print(f"   Removed channels: {remove_channels} ({len(remove_channels)} channels)")
+                print(f"   Final input channels: {input_channels}")
+                model_from_checkpoint = LandsatLSTPredictor.load_from_checkpoint(
+                    checkpoint_path,
+                    input_sequence_length=input_sequence_length,
+                    output_sequence_length=output_sequence_length,
+                    model_size=model_size,
+                    input_channels=input_channels
+                )
+                test_results = trainer.test(model_from_checkpoint, data_module)
             print(f"✅ Test completed: {test_results}")
         except Exception as e:
             print(f"⚠️ Test failed: {e}")
@@ -263,8 +307,6 @@ def train_landsat_model(
                 wandb.finish()
         except:
             pass
-    
-    return trainer, model_from_checkpoint, data_module
 
 def main():
     parser = argparse.ArgumentParser(description="Train Landsat LST prediction model with cache awareness")
@@ -297,6 +339,9 @@ def main():
     parser.add_argument("--test_years", type=int, nargs="*",
                         default=[2017], 
                         help="Years for test split")
+    parser.add_argument("--remove_channels", type=str, nargs="*",
+                        default=[],  # 'NDVI' 'red' 'blue' etc.
+                        help="Years for training split")
     
     # Quality filtering
     parser.add_argument("--max_nodata", type=float, default=0.95,
@@ -305,6 +350,8 @@ def main():
     # Training parameters
     parser.add_argument("--wandb_project", type=str, default="AAAI-Project-final-tests",
                         help="Weights & Biases project name")
+    parser.add_argument("--checkpoint", type=str, default="personalized",
+                        help="Defines a checkpoint path to test")
     parser.add_argument("--learning_rate", type=float, default=0.001,
                         help="Learning rate")
     parser.add_argument("--batch_size", type=int, default=2,
@@ -355,7 +402,7 @@ def main():
     print("=" * 60)
     
     try:
-        trainer, model, data_module = train_landsat_model(
+        train_landsat_model(
             # Dataset parameters (cache-compatible)
             dataset_root=args.dataset_root,
             cluster=args.cluster,
@@ -368,6 +415,8 @@ def main():
             debug_year=args.debug_year,
             max_input_nodata_pct=args.max_nodata,
             use_all=args.use_all,
+            checkpoint_path=args.checkpoint,
+            remove_channels=args.remove_channels,
             
             # Training parameters
             wandb_project=args.wandb_project,

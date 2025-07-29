@@ -70,6 +70,10 @@ for cluster in "${CLUSTERS[@]}"; do
                 for precision in "${PRECISIONS[@]}"; do
                     for removed_channels in "${REMOVED_CHANNELS_CONFIGS[@]}"; do
                         CURRENT=$((CURRENT + 1))
+                        if [ $CURRENT -le 3 ]; then
+                            log_and_echo "⏭️  Skipping run $CURRENT (continuing from run 4)"
+                            continue
+                        fi
 
                         log_error "================================================="
                         log_error "🎯 Starting training run $CURRENT/$TOTAL_COMBINATIONS"
